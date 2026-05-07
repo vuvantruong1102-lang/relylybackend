@@ -1,0 +1,13 @@
+# Railway deployment config
+# Railway tự động detect Node.js project từ package.json. File này chỉ
+# fine-tune health check và restart policy.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "npm start"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

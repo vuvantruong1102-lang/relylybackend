@@ -1,0 +1,38 @@
+# Render Blueprint - deploy bằng cách import repo này vào Render
+# Render sẽ tự đọc file này và tạo service + disk theo cấu hình
+
+services:
+  - type: web
+    name: replyly-backend
+    runtime: node
+    region: singapore       # đổi sang ohio/oregon/frankfurt nếu muốn
+    plan: free              # free tier; nếu cần luôn-luôn-on, đổi sang starter ($7/tháng)
+    buildCommand: npm install --production=false
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true        # tự deploy lại khi push lên GitHub
+
+    # Persistent disk cho SQLite database
+    disk:
+      name: replyly-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_PATH
+        value: /opt/render/project/src/data/replyly.db
+      # Các biến bí mật phải set thủ công ở dashboard Render -> Environment
+      - key: FB_APP_SECRET
+        sync: false
+      - key: FB_VERIFY_TOKEN
+        sync: false
+      - key: FB_PAGE_ACCESS_TOKEN
+        sync: false
+      - key: FB_PAGE_ID
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
