@@ -293,18 +293,6 @@ export async function processMessage(payload) {
     return Conversations.get(convId);
   }
 
-  // ANTI-SPAM: Chỉ reply tin đầu tiên
-  if (!isFirstMessage) {
-    console.log(`[engine] Skipping DM from ${senderId} - not the first message`);
-    Messages.add({
-      conversationId: convId,
-      role: "ai",
-      text: "[Hệ thống] Bỏ qua - không phải tin nhắn đầu tiên.",
-      metadata: { skipped: true, reason: "anti_spam_not_first" },
-    });
-    return Conversations.get(convId);
-  }
-
   // Resolve link based on post reference (if any)
   const conversation = Conversations.get(convId);
   const linkContext = resolveLink({ postId: conversation.post_id });
