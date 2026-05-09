@@ -1,9 +1,50 @@
 import { Posts, Conversations, Messages, Settings } from "./db.js";
-import { generateReply } from "./claude.js";
 import * as FB from "./facebook.js";
-import { detectBuyIntent, detectComplaint } from "./intent.js";
+import { detectComplaint } from "./intent.js";
 import { config } from "./config.js";
 import { broadcast } from "./sse.js";
+
+// ---- Keyword-based reply (thay thế AI) -----------------------------------
+function generateKeywordReply({ customerMessage, linkContext }) {
+  const link = linkContext?.link || null;
+
+  // Nếu không có link Shopee → trả về thông báo lỗi
+  if (!link) {
+    return {
+      reply: "Hiện tại không có link Shopee.",
+      confidence: 1.0,
+      needs_human: false,
+      reason: "no_shopee_link",
+      buy_intent: false,
+      link_sent: false,
+    };
+  }
+
+  const text = (customerMessage || "").toLowerCase();
+
+  // Keyword groups
+  const askingPriceKeywords = ["giá", "bao nhiêu tiền", "bao nhiêu vậy", "bn tiền", "bn vậy"];
+  const askingBuyKeywords = ["mua", "ở đâu", "link", "địa chỉ", "đặt", "order"];
+
+  let reply;
+
+  if (askingPriceKeywords.some(kw => text.includes(kw))) {
+    reply = `Anh chị click vào link Shopee này để xem giá và mua hàng nhé: ${link}`;
+  } else if (askingBuyKeywords.some(kw => text.includes(kw))) {
+    reply = `Anh chị click vào link Shopee này để mua hàng nhé: ${link}`;
+  } else {
+    reply = `Anh chị click vào link Shopee này để mua hàng nhé: ${link}`;
+  }
+
+  return {
+    reply,
+    confidence: 1.0,
+    needs_human: false,
+    reason: "keyword_match",
+    buy_intent: true,
+    link_sent: true,
+  };
+}
 
 // ---- Link resolution ------------------------------------------------------
 /**
@@ -31,14 +72,6 @@ const genId = (prefix) => `${prefix}_${Date.now()}_${Math.random().toString(36).
 // ---- Process incoming COMMENT --------------------------------------------
 /**
  * Called when a customer comments on a page post.
- * @param {object} payload Webhook value object from FB feed change
- *   {
- *     comment_id: "...",     // Required
- *     post_id: "...",        // Required (we use this to look up the link)
- *     message: "Mua ở đâu?", // Customer's text
- *     from: { id: "...", name: "..." },
- *     parent_id: "...",      // If it's a nested comment, parent comment id
- *   }
  */
 export async function processComment(payload) {
   const { comment_id, post_id, message, from } = payload;
@@ -53,8 +86,7 @@ export async function processComment(payload) {
     return null;
   }
 
-  // Make sure we have post info; fetch if missing (Shopee link extraction
-  // may have happened via the 'add' post event already, but be defensive)
+  // Make sure we have post info; fetch if missing
   let post = Posts.get(post_id);
   if (!post) {
     try {
@@ -72,6 +104,13 @@ export async function processComment(payload) {
       console.error("[engine] Could not fetch post:", err.message);
     }
   }
+
+  // ANTI-SPAM: Check if this customer already has an active conversation on this post
+  const existingConv = Conversations.findOpenByCustomerAndType?.({
+    customerId: from.id,
+    type: "comment",
+  });
+  const alreadyRepliedOnThisPost = existingConv && existingConv.post_id === post_id;
 
   // Create conversation record
   const convId = genId("conv");
@@ -99,14 +138,8 @@ export async function processComment(payload) {
     return Conversations.get(convId);
   }
 
-  // Pre-flag for ops dashboard (AI also detects, but this is faster)
-  const intentSignals = {
-    buyIntent: detectBuyIntent(message),
-    isComplaint: detectComplaint(message),
-  };
-
-  if (intentSignals.isComplaint) {
-    // Complaints with order numbers should probably go to a human
+  // Pre-flag complaints
+  if (detectComplaint(message)) {
     Conversations.setStatus(convId, "needs_review");
     Messages.add({
       conversationId: convId,
@@ -117,41 +150,53 @@ export async function processComment(payload) {
     return Conversations.get(convId);
   }
 
-  // Generate AI reply
-  const linkContext = resolveLink({ postId: post_id });
-  const postContextStr = post?.title ? `bài đăng "${post.title}"` : "bài đăng";
-
-  let aiResult;
-  try {
-    aiResult = await generateReply({
-      customerMessage: message,
-      isComment: true,
-      postContext: postContextStr,
-      linkContext,
+  // ANTI-SPAM: Skip if already replied on this post
+  if (alreadyRepliedOnThisPost) {
+    console.log(`[engine] Skipping comment from ${from.id} - already replied on post ${post_id}`);
+    Conversations.setStatus(convId, "skipped_duplicate");
+    Messages.add({
+      conversationId: convId,
+      role: "ai",
+      text: "[Hệ thống] Bỏ qua - đã reply khách này trên post này.",
+      metadata: { skipped: true, reason: "anti_spam_duplicate" },
     });
-  } catch (err) {
-    console.error("[engine] AI generation failed:", err);
-    Conversations.setStatus(convId, "failed");
     return Conversations.get(convId);
   }
 
-  // Decide: send automatically OR keep for human review
-  const shouldAutoSend =
-    aiResult.confidence >= config.behavior.confidenceThreshold &&
-    !aiResult.needs_human;
+  // Generate keyword reply
+  const linkContext = resolveLink({ postId: post_id });
+  const aiResult = generateKeywordReply({
+    customerMessage: message,
+    linkContext,
+  });
 
-  let fbMessageId = null;
-  if (shouldAutoSend) {
-    try {
-      const sent = await FB.replyToComment(comment_id, aiResult.reply);
-      fbMessageId = sent.id;
-      Conversations.setStatus(convId, "replied");
-    } catch (err) {
-      console.error("[engine] Failed to send comment reply:", err.message);
-      Conversations.setStatus(convId, "failed");
+  // Always send (confidence is always 1.0 for keyword match)
+  let fbCommentReplyId = null;
+  let fbInboxMessageId = null;
+
+  // 1. Reply public dưới comment
+  try {
+    const sent = await FB.replyToComment(comment_id, aiResult.reply);
+    fbCommentReplyId = sent.id;
+  } catch (err) {
+    console.error("[engine] Failed to send comment reply:", err.message);
+  }
+
+  // 2. Inbox riêng cho khách (PRIVATE_REPLIES)
+  try {
+    if (FB.sendPrivateReply) {
+      const inboxSent = await FB.sendPrivateReply(comment_id, aiResult.reply);
+      fbInboxMessageId = inboxSent?.message_id || inboxSent?.id || null;
     }
+  } catch (err) {
+    console.error("[engine] Failed to send private reply (inbox):", err.message);
+  }
+
+  // Update status
+  if (fbCommentReplyId || fbInboxMessageId) {
+    Conversations.setStatus(convId, "replied");
   } else {
-    Conversations.setStatus(convId, "needs_review");
+    Conversations.setStatus(convId, "failed");
   }
 
   Messages.add({
@@ -166,10 +211,11 @@ export async function processComment(payload) {
       link_sent: aiResult.link_sent,
       link_used: aiResult.link_sent ? linkContext.link : null,
       link_source: aiResult.link_sent ? linkContext.source : null,
-      auto_sent: shouldAutoSend,
-      pre_flag: intentSignals,
+      auto_sent: true,
+      sent_to_comment: !!fbCommentReplyId,
+      sent_to_inbox: !!fbInboxMessageId,
     },
-    facebookMessageId: fbMessageId,
+    facebookMessageId: fbCommentReplyId,
   });
 
   return Conversations.get(convId);
@@ -178,13 +224,6 @@ export async function processComment(payload) {
 // ---- Process incoming MESSAGE (DM) ---------------------------------------
 /**
  * Called when a customer sends a direct message to the page.
- * @param {object} payload
- *   {
- *     mid: "...",          // Message ID
- *     senderId: "...",     // PSID
- *     text: "...",
- *     referralPostId: "..." (optional - if customer clicked "Send Message" from a post)
- *   }
  */
 export async function processMessage(payload) {
   const { mid, senderId, text, referralPostId } = payload;
@@ -192,23 +231,26 @@ export async function processMessage(payload) {
   if (!text) return null;
   if (senderId === config.facebook.pageId) return null;
 
-  // Try to thread with an existing recent conversation (so we don't spam a
-  // new convo for every message). For simplicity we look back 24h.
+  // Try to thread with an existing recent conversation
   let conv = Conversations.findOpenByCustomerAndType({
     customerId: senderId,
     type: "message",
   });
 
   let convId;
+  let isFirstMessage = true; // Flag để biết có phải tin đầu tiên không
+
   if (conv) {
     convId = conv.id;
+    // Đã có conversation → đây không phải tin đầu tiên
+    isFirstMessage = false;
+
     // Update post link if we just learned about a referral
     if (referralPostId && !conv.post_id) {
       Conversations.setPost(convId, referralPostId);
     }
   } else {
     convId = genId("conv");
-    // Try to enrich with profile name
     let customerName = "Khách";
     try {
       const profile = await FB.getUserProfile(senderId);
@@ -240,8 +282,7 @@ export async function processMessage(payload) {
   }
 
   // Pre-flag complaints
-  const isComplaint = detectComplaint(text);
-  if (isComplaint) {
+  if (detectComplaint(text)) {
     Conversations.setStatus(convId, "needs_review");
     Messages.add({
       conversationId: convId,
@@ -252,46 +293,37 @@ export async function processMessage(payload) {
     return Conversations.get(convId);
   }
 
+  // ANTI-SPAM: Chỉ reply tin đầu tiên
+  if (!isFirstMessage) {
+    console.log(`[engine] Skipping DM from ${senderId} - not the first message`);
+    Messages.add({
+      conversationId: convId,
+      role: "ai",
+      text: "[Hệ thống] Bỏ qua - không phải tin nhắn đầu tiên.",
+      metadata: { skipped: true, reason: "anti_spam_not_first" },
+    });
+    return Conversations.get(convId);
+  }
+
   // Resolve link based on post reference (if any)
   const conversation = Conversations.get(convId);
   const linkContext = resolveLink({ postId: conversation.post_id });
 
-  let postContextStr;
-  if (conversation.post_id) {
-    const p = Posts.get(conversation.post_id);
-    postContextStr = p?.title ? `bài đăng "${p.title}"` : "bài đăng";
-  }
+  // Generate keyword reply
+  const aiResult = generateKeywordReply({
+    customerMessage: text,
+    linkContext,
+  });
 
-  let aiResult;
-  try {
-    aiResult = await generateReply({
-      customerMessage: text,
-      isComment: false,
-      postContext: postContextStr,
-      linkContext,
-    });
-  } catch (err) {
-    console.error("[engine] AI generation failed:", err);
-    Conversations.setStatus(convId, "failed");
-    return Conversations.get(convId);
-  }
-
-  const shouldAutoSend =
-    aiResult.confidence >= config.behavior.confidenceThreshold &&
-    !aiResult.needs_human;
-
+  // Always send
   let fbMessageId = null;
-  if (shouldAutoSend) {
-    try {
-      const sent = await FB.sendMessage(senderId, aiResult.reply);
-      fbMessageId = sent.message_id;
-      Conversations.setStatus(convId, "replied");
-    } catch (err) {
-      console.error("[engine] Failed to send DM:", err.message);
-      Conversations.setStatus(convId, "failed");
-    }
-  } else {
-    Conversations.setStatus(convId, "needs_review");
+  try {
+    const sent = await FB.sendMessage(senderId, aiResult.reply);
+    fbMessageId = sent.message_id;
+    Conversations.setStatus(convId, "replied");
+  } catch (err) {
+    console.error("[engine] Failed to send DM:", err.message);
+    Conversations.setStatus(convId, "failed");
   }
 
   Messages.add({
@@ -306,7 +338,7 @@ export async function processMessage(payload) {
       link_sent: aiResult.link_sent,
       link_used: aiResult.link_sent ? linkContext.link : null,
       link_source: aiResult.link_sent ? linkContext.source : null,
-      auto_sent: shouldAutoSend,
+      auto_sent: true,
     },
     facebookMessageId: fbMessageId,
   });
@@ -315,10 +347,6 @@ export async function processMessage(payload) {
 }
 
 // ---- Process new/edited POST ---------------------------------------------
-/**
- * Indexes posts and extracts Shopee links so future comments on this post
- * can use the right link automatically.
- */
 export async function processPostUpdate(payload) {
   const { post_id, message, verb } = payload;
   if (verb === "remove") {
@@ -326,8 +354,6 @@ export async function processPostUpdate(payload) {
     return;
   }
 
-  // Sometimes 'message' is in payload, sometimes we need to fetch. Always
-  // fetch to get the permalink and to be safe.
   let permalink = null;
   let fullMessage = message || "";
   try {
@@ -350,7 +376,6 @@ export async function processPostUpdate(payload) {
     permalink,
   });
 
-  // Notify all connected dashboard clients instantly
   broadcast({ type: "new_post", post: savedPost });
 
   if (shopeeLink) {
@@ -386,27 +411,19 @@ export async function sendManualReply({ conversationId, text }) {
   return Conversations.get(conversationId);
 }
 
-// ---- Regenerate AI reply (called when human rejects current draft) ------
+// ---- Regenerate reply (now uses keyword logic) ---------------------------
 
 export async function regenerateReply(conversationId) {
   const conv = Conversations.get(conversationId);
   if (!conv) throw new Error("Conversation not found");
 
-  // Get the last customer message
   const lastCustomer = [...conv.messages].reverse().find(m => m.role === "customer");
   if (!lastCustomer) throw new Error("No customer message to reply to");
 
   const linkContext = resolveLink({ postId: conv.post_id });
-  let postContextStr;
-  if (conv.post_id) {
-    const p = Posts.get(conv.post_id);
-    postContextStr = p?.title ? `bài đăng "${p.title}"` : "bài đăng";
-  }
 
-  const aiResult = await generateReply({
+  const aiResult = generateKeywordReply({
     customerMessage: lastCustomer.text,
-    isComment: conv.type === "comment",
-    postContext: postContextStr,
     linkContext,
   });
 
