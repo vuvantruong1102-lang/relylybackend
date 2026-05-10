@@ -4,7 +4,7 @@ import { config } from "./config.js";
 import { initSchema, pool } from "./db.js";
 import { adminRouter } from "./admin.js";
 import { webhookRouter, rawBodyMiddleware, verifyWebhookSignature } from "./webhook.js";
-
+import { migrateRouter } from "./migrate.js";
 const app = express();
 
 // CORS - cho phép frontend gọi từ FRONTEND_URL
@@ -21,7 +21,8 @@ app.get("/health", (req, res) => {
 
 // Webhook routes - cần raw body để verify HMAC, mount TRƯỚC express.json
 app.use("/webhook", express.json({ verify: rawBodyMiddleware }), verifyWebhookSignature, webhookRouter);
-
+// TẠM THỜI: endpoint migrate, xóa sau khi xong
+app.use("/api", migrateRouter);
 // Admin/API routes
 app.use("/api", adminRouter);
 
