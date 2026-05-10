@@ -1,6 +1,5 @@
-// ENDPOINT TẠMG THỜI - dùng để migrate page từ env vào DB qua HTTP
-// XÓA SAU KHI MIGRATE XONG để tránh ai gọi nhầm
-// Truy cập: GET https://<v2-domain>/api/migrate-from-env?key=<DASHBOARD_PASSWORD>
+// ENDPOINT TẠM THỜI - dùng để migrate page và debug verify_token
+// XÓA SAU KHI MIGRATE XONG
 
 import express from "express";
 import * as Pages from "./pages.js";
@@ -9,16 +8,23 @@ import crypto from "node:crypto";
 
 export const migrateRouter = express.Router();
 
-migrateRouter.get("/migrate-from-env", async (req, res) => {
-  // Auth: dùng DASHBOARD_PASSWORD qua query param
+function checkAuth(req, res) {
   const provided = String(req.query.key || "");
   const expected = config.auth.password;
 
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).json({ error: "Invalid key" });
+    res.status(401).json({ error: "Invalid key" });
+    return false;
   }
+  return true;
+}
+
+// ---- Migrate page từ env vào DB -----------------------------------------
+
+migrateRouter.get("/migrate-from-env", async (req, res) => {
+  if (!checkAuth(req, res)) return;
 
   const facebookPageId = process.env.FB_PAGE_ID;
   const accessToken = process.env.FB_PAGE_ACCESS_TOKEN;
@@ -62,13 +68,6 @@ migrateRouter.get("/migrate-from-env", async (req, res) => {
         status: page.status,
         days_until_expiry: page.days_until_expiry,
       },
-      next_steps: [
-        "1. Lấy verify_token từ Postgres tab Data",
-        "2. Update webhook URL + verify token trên Facebook Developer",
-        "3. Test webhook hoạt động",
-        "4. XÓA endpoint /api/migrate-from-env khỏi code (xóa file migrate.js + import trong server.js)",
-        "5. Xóa env: FB_PAGE_ACCESS_TOKEN, FB_PAGE_ID, FB_VERIFY_TOKEN",
-      ],
     });
   } catch (err) {
     console.error("[migrate] Failed:", err);
@@ -80,24 +79,104 @@ migrateRouter.get("/migrate-from-env", async (req, res) => {
   }
 });
 
-// Endpoint phụ để xem verify_token (cần để config webhook FB)
-migrateRouter.get("/get-verify-token", async (req, res) => {
-  const provided = String(req.query.key || "");
-  const expected = config.auth.password;
+// ---- Lấy verify_token --------------------------------------------------
 
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).json({ error: "Invalid key" });
-  }
+migrateRouter.get("/get-verify-token", async (req, res) => {
+  if (!checkAuth(req, res)) return;
 
   const { query } = await import("./db.js");
   const result = await query(
-    `SELECT id, facebook_page_id, display_name, verify_token FROM pages ORDER BY id`
+    `SELECT id, facebook_page_id, display_name, verify_token, length(verify_token) as token_length
+     FROM pages ORDER BY id`
   );
 
   res.json({
     pages: result.rows,
-    instructions: "Copy verify_token của page muốn config → paste vào Facebook Developer → Webhooks → Edit Subscription → Verify Token",
+    instructions: "Copy verify_token chính xác (không có khoảng trắng) → paste vào Facebook Webhooks Verify Token",
+  });
+});
+
+// ---- Reset verify_token thành chuỗi cố định để dễ debug ---------------
+// Dùng: GET /api/set-verify-token?key=<PASS>&pageId=<FB_PAGE_ID>&token=<CHUOI_MOI>
+
+migrateRouter.get("/set-verify-token", async (req, res) => {
+  if (!checkAuth(req, res)) return;
+
+  const { pageId, token } = req.query;
+
+  if (!pageId || !token) {
+    return res.status(400).json({
+      error: "Can truyen pageId (Facebook Page ID) va token (chuoi moi)",
+      example: "/api/set-verify-token?key=<PASS>&pageId=27544...&token=mytoken123",
+    });
+  }
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(token)) {
+    return res.status(400).json({
+      error: "Token chi duoc chua chu, so, dau _ va -",
+    });
+  }
+
+  if (token.length < 10 || token.length > 100) {
+    return res.status(400).json({
+      error: "Token phai dai 10-100 ky tu",
+    });
+  }
+
+  const { query } = await import("./db.js");
+  const result = await query(
+    `UPDATE pages SET verify_token = $1, updated_at = $2 WHERE facebook_page_id = $3 RETURNING id, facebook_page_id, display_name, verify_token`,
+    [token, Date.now(), pageId]
+  );
+
+  if (result.rows.length === 0) {
+    return res.status(404).json({ error: "Page not found" });
+  }
+
+  res.json({
+    status: "success",
+    message: "Verify token da duoc update. Gio dung token nay khi config webhook tren Facebook.",
+    page: result.rows[0],
+  });
+});
+
+// ---- Test webhook verify truc tiep (khong can Facebook) ---------------
+// Dung: GET /api/test-webhook-verify?key=<PASS>&token=<TOKEN_TEST>
+
+migrateRouter.get("/test-webhook-verify", async (req, res) => {
+  if (!checkAuth(req, res)) return;
+
+  const { token } = req.query;
+  if (!token) {
+    return res.status(400).json({ error: "Can truyen token" });
+  }
+
+  const { query } = await import("./db.js");
+  const result = await query(
+    `SELECT id, facebook_page_id, display_name FROM pages WHERE verify_token = $1`,
+    [String(token)]
+  );
+
+  if (result.rows.length === 0) {
+    const all = await query(`SELECT facebook_page_id, verify_token, length(verify_token) as len FROM pages`);
+    return res.json({
+      match: false,
+      message: "Token khong khop voi page nao",
+      debug: {
+        tokenSent: token,
+        tokenSentLength: token.length,
+        pagesInDb: all.rows.map(r => ({
+          page_id: r.facebook_page_id,
+          token_starts_with: r.verify_token.slice(0, 8) + "...",
+          token_length: r.len,
+        })),
+      },
+    });
+  }
+
+  res.json({
+    match: true,
+    page: result.rows[0],
+    message: "Token khop! Co the dung de verify webhook tren Facebook.",
   });
 });
