@@ -1,0 +1,26 @@
+{
+  "name": "replyly-backend",
+  "version": "2.0.0",
+  "description": "Multi-page Facebook auto-reply backend with encrypted token storage",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "migrate": "node scripts/migrate.js",
+    "import-from-env": "node scripts/import-from-env.js",
+    "test:webhook": "node scripts/test-webhook.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.13.1",
+    "xlsx": "^0.18.5"
+  },
+  "engines": {
+    "node": "20.x"
+  }
+}
