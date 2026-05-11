@@ -1,19 +1,28 @@
-// Detect các tín hiệu khiếu nại trong message khách hàng
-// Khi phát hiện -> không auto reply, đẩy lên cho nhân viên
+// Detect cac tin hieu khieu nai trong message khach hang
+// Khi phat hien -> khong auto reply, day len cho nhan vien
 
+// Tu khoa khieu nai - moi tu phai du dac trung, KHONG dung tu 1 ky tu
+// vi se match nham vao cac tu khac (vd "to" match "tot", "tom"...)
 const COMPLAINT_KEYWORDS = [
-  "lỗi", "hỏng", "kém", "tệ", "chán", "lừa", "lừa đảo", "lừa người",
-  "trả hàng", "hoàn tiền", "refund", "khiếu nại", "phản ánh",
-  "không nhận được", "chưa nhận", "thiếu hàng", "sai hàng",
-  "rách", "vỡ", "móp", "bể", "ố", "bẩn", "dơ",
-  "cảnh báo", "tố cáo", "tố", "scam",
-  "tệ quá", "dở quá", "mất tiền",
+  "lỗi sản phẩm", "hàng lỗi", "bị lỗi",
+  "hỏng", "hư", "kém chất lượng",
+  "tệ quá", "tệ thế", "tệ vậy", "quá tệ",
+  "chán quá", "thất vọng",
+  "lừa đảo", "lừa người", "bị lừa",
+  "trả hàng", "hoàn tiền", "refund",
+  "khiếu nại", "phản ánh", "phàn nàn",
+  "không nhận được", "chưa nhận được", "không nhận hàng",
+  "thiếu hàng", "sai hàng", "giao sai",
+  "hàng rách", "hàng vỡ", "hàng móp", "hàng bể",
+  "ố vàng", "ố bẩn", "bị bẩn", "hàng bẩn", "hàng dơ",
+  "cảnh báo", "tố cáo", "scam",
+  "dở quá", "mất tiền",
 ];
 
+// Patterns: chi match khi co cau truc complaint ro rang
 const COMPLAINT_PATTERNS = [
-  /không\s+(?:được|hài\s*lòng|tốt|đúng|nhận)/i,
-  /sao\s+(?:không|chưa)/i,
-  /(?:đã|tôi)\s+(?:đặt|mua)\s+.+(?:nhưng|mà)/i,
+  /không\s+(?:hài\s*lòng|đúng\s*hàng|đúng\s*sản\s*phẩm)/i,
+  /(?:đã|tôi)\s+(?:đặt|mua)\s+.+(?:nhưng|mà)\s+.*(?:không|chưa|sai|lỗi)/i,
 ];
 
 export function detectComplaint(text) {
@@ -29,7 +38,7 @@ export function detectComplaint(text) {
   return false;
 }
 
-// Buy intent (giữ lại để dùng sau)
+// Buy intent (giu lai de dung sau)
 export function detectBuyIntent(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
