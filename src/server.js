@@ -3,26 +3,30 @@ import cors from "cors";
 import { config } from "./config.js";
 import { initSchema, pool } from "./db.js";
 import { adminRouter } from "./admin.js";
-import { webhookRouter, rawBodyMiddleware, verifyWebhookSignature } from "./webhook.js";
+import { webhookRouter, rawBodyMiddleware } from "./webhook.js";
 import { migrateRouter } from "./migrate.js";
+
 const app = express();
 
-// CORS - cho phép frontend gọi từ FRONTEND_URL
+// CORS - cho phep frontend goi tu FRONTEND_URL
 app.use(cors({
   origin: config.frontendUrl === "*" ? true : config.frontendUrl.split(",").map(s => s.trim()),
   credentials: true,
   exposedHeaders: ["Content-Type"],
 }));
 
-// Health (KHÔNG yêu cầu auth, dùng cho Railway healthcheck)
+// Health (KHONG yeu cau auth, dung cho Railway healthcheck)
 app.get("/health", (req, res) => {
   res.json({ ok: true, ts: Date.now(), version: "2.0.0" });
 });
 
-// Webhook routes - cần raw body để verify HMAC, mount TRƯỚC express.json
-app.use("/webhook", express.json({ verify: rawBodyMiddleware }), verifyWebhookSignature, webhookRouter);
-// TẠM THỜI: endpoint migrate, xóa sau khi xong
+// Webhook routes - can raw body cho HMAC verify (chi ap dung POST)
+// GET verify khong can signature, POST events can
+app.use("/webhook", express.json({ verify: rawBodyMiddleware }), webhookRouter);
+
+// TAM THOI: migrate endpoint, xoa sau khi xong
 app.use("/api", migrateRouter);
+
 // Admin/API routes
 app.use("/api", adminRouter);
 
@@ -52,7 +56,6 @@ async function start() {
     console.log(`[server] Replyly backend listening on :${config.port} (${config.nodeEnv})`);
   });
 
-  // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`[server] Received ${signal}, shutting down gracefully...`);
     server.close(async () => {
@@ -65,7 +68,6 @@ async function start() {
         process.exit(1);
       }
     });
-    // Force exit sau 10s
     setTimeout(() => process.exit(1), 10000);
   };
 
