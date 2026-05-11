@@ -1,46 +1,47 @@
-// Fast client-side intent classifier. The AI does its own detection too
-// (and is more accurate on edge cases), but this lets us:
-//   1. Pre-flag conversations in the dashboard
-//   2. Skip expensive AI calls when we're highly confident (optional)
-//   3. Decide whether to inject the link context into the prompt at all
+// Detect cac tin hieu khieu nai trong message khach hang
+// Khi phat hien -> khong auto reply, day len cho nhan vien
 
-const BUY_INTENT_PATTERNS = [
-  /mua\s*(ở|o)?\s*(đâu|dau)/i,
-  /\blink\b/i,
-  /\bshopee\b/i,
-  /đặt\s*(mua|hàng|đơn)/i,
-  /\border\b/i,
-  /chốt\s*đơn/i,
-  /lấy\s*(1|một|2|3|hàng)/i,
-  /mua\s*(luôn|ngay|này|nha)/i,
-  /muốn\s*mua/i,
-  /ship\s*(về|cho|tới|đến)/i,
-  /thanh\s*toán/i,
-  /cho\s*xin\s*link/i,
-  /gửi\s*link/i,
-  /\bcheckout\b/i,
+// Tu khoa khieu nai - moi tu phai du dac trung, KHONG dung tu 1 ky tu
+// vi se match nham vao cac tu khac (vd "to" match "tot", "tom"...)
+const COMPLAINT_KEYWORDS = [
+  "lỗi sản phẩm", "hàng lỗi", "bị lỗi",
+  "hỏng", "hư", "kém chất lượng",
+  "tệ quá", "tệ thế", "tệ vậy", "quá tệ",
+  "chán quá", "thất vọng",
+  "lừa đảo", "lừa người", "bị lừa",
+  "trả hàng", "hoàn tiền", "refund",
+  "khiếu nại", "phản ánh", "phàn nàn",
+  "không nhận được", "chưa nhận được", "không nhận hàng",
+  "thiếu hàng", "sai hàng", "giao sai",
+  "hàng rách", "hàng vỡ", "hàng móp", "hàng bể",
+  "ố vàng", "ố bẩn", "bị bẩn", "hàng bẩn", "hàng dơ",
+  "cảnh báo", "tố cáo", "scam",
+  "dở quá", "mất tiền",
 ];
 
+// Patterns: chi match khi co cau truc complaint ro rang
 const COMPLAINT_PATTERNS = [
-  /lỗi/i,
-  /hỏng/i,
-  /không\s*(nhận|có|đúng|được)/i,
-  /chưa\s*nhận/i,
-  /trả\s*hàng/i,
-  /hoàn\s*tiền/i,
-  /khiếu\s*nại/i,
-  /đơn\s*hàng.*#?\s*\d+/i,
-  /mã\s*đơn/i,
-  /tệ\s*quá/i,
-  /thất\s*vọng/i,
+  /không\s+(?:hài\s*lòng|đúng\s*hàng|đúng\s*sản\s*phẩm)/i,
+  /(?:đã|tôi)\s+(?:đặt|mua)\s+.+(?:nhưng|mà)\s+.*(?:không|chưa|sai|lỗi)/i,
 ];
-
-export function detectBuyIntent(text) {
-  if (!text) return false;
-  return BUY_INTENT_PATTERNS.some(p => p.test(text));
-}
 
 export function detectComplaint(text) {
   if (!text) return false;
-  return COMPLAINT_PATTERNS.some(p => p.test(text));
+  const lower = text.toLowerCase();
+
+  for (const kw of COMPLAINT_KEYWORDS) {
+    if (lower.includes(kw)) return true;
+  }
+  for (const re of COMPLAINT_PATTERNS) {
+    if (re.test(text)) return true;
+  }
+  return false;
+}
+
+// Buy intent (giu lai de dung sau)
+export function detectBuyIntent(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  const buyKeywords = ["mua", "order", "đặt", "ship", "giao hàng", "ở đâu", "link", "giá", "bao nhiêu"];
+  return buyKeywords.some(kw => lower.includes(kw));
 }
