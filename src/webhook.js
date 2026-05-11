@@ -7,60 +7,54 @@ import { config } from "./config.js";
 export const webhookRouter = express.Router();
 
 // ---- GET /webhook - Facebook verification (per-page) --------------------
-// Khi Facebook verify URL, nó gửi `hub.verify_token` mà ta phải so với
-// verify_token đã đăng ký. Vì mỗi page có verify_token riêng, ta check
-// trong DB.
+// Khong can verify HMAC signature cho GET (Facebook khong gui signature)
 
 webhookRouter.get("/", async (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
+  console.log(`[webhook] GET verify request: mode=${mode}, token=${token ? token.slice(0, 8) + "..." : "(empty)"}`);
+
   if (mode !== "subscribe" || !token) {
+    console.warn("[webhook] Invalid verify request - missing mode or token");
     return res.sendStatus(400);
   }
 
-  // Check xem token này có khớp với page nào trong DB không
   const { query } = await import("./db.js");
   const result = await query(
-    `SELECT id FROM pages WHERE verify_token = $1`,
+    `SELECT id, facebook_page_id FROM pages WHERE verify_token = $1`,
     [token]
   );
 
   if (result.rows.length === 0) {
-    console.warn(`[webhook] Verify token không khớp với page nào: ${token.slice(0, 8)}...`);
+    console.warn(`[webhook] Verify token khong khop voi page nao: ${token.slice(0, 8)}...`);
     return res.sendStatus(403);
   }
 
-  console.log(`[webhook] Verified for page ID ${result.rows[0].id}`);
+  console.log(`[webhook] Verified successfully for page ID ${result.rows[0].id} (FB ${result.rows[0].facebook_page_id})`);
   return res.status(200).send(challenge);
 });
 
-// ---- POST /webhook - nhận events từ Facebook ----------------------------
-// Express needs raw body cho HMAC verification, nên expose middleware này
-// ở server.js trước khi parse JSON.
+// ---- POST /webhook - nhan events tu Facebook ----------------------------
+// CO verify HMAC signature
 
-webhookRouter.post("/", async (req, res) => {
-  // verifySignature đã chạy ở middleware trước
+webhookRouter.post("/", verifyWebhookSignature, async (req, res) => {
   const body = req.body;
 
   if (body.object !== "page") {
     return res.sendStatus(404);
   }
 
-  // Facebook gửi batch events trong entry[]
-  // Mỗi entry là 1 page
   for (const entry of body.entry || []) {
     const pageId = entry.id;
 
-    // Verify page tồn tại trong DB
     const page = await Pages.getPageByFacebookId(pageId);
     if (!page) {
-      console.warn(`[webhook] Received event cho page chưa register: ${pageId}`);
+      console.warn(`[webhook] Received event cho page chua register: ${pageId}`);
       continue;
     }
 
-    // Process events
     try {
       await processEntry(pageId, entry);
     } catch (err) {
@@ -68,7 +62,6 @@ webhookRouter.post("/", async (req, res) => {
     }
   }
 
-  // Trả 200 ngay (Facebook timeout 20s)
   res.sendStatus(200);
 });
 
@@ -84,24 +77,22 @@ async function processEntry(pageId, entry) {
         referralPostId: event.referral?.ref || event.message?.referral?.product?.id || null,
       });
     } else if (event.referral?.ref) {
-      // Send Message từ post → tạo conv stub với postId
       await engine.processMessage({
         pageId,
         mid: null,
         senderId: event.sender.id,
-        text: "(Khách bấm Send Message từ bài viết)",
+        text: "(Khach bam Send Message tu bai viet)",
         referralPostId: event.referral.ref,
       });
     }
   }
 
-  // Feed changes (posts, comments)
+  // Feed changes
   for (const change of entry.changes || []) {
     if (change.field !== "feed") continue;
     const v = change.value;
 
     if (v.item === "comment") {
-      // Skip comment do page tự tạo
       if (v.from?.id === pageId) continue;
 
       await engine.processComment({
@@ -123,7 +114,7 @@ async function processEntry(pageId, entry) {
 }
 
 // ---- Middleware: verify HMAC signature ----------------------------------
-// Mount trước parser JSON cho raw body access
+
 export function rawBodyMiddleware(req, res, buf) {
   req.rawBody = buf;
 }
@@ -131,7 +122,7 @@ export function rawBodyMiddleware(req, res, buf) {
 export function verifyWebhookSignature(req, res, next) {
   const sig = req.headers["x-hub-signature-256"];
   if (!verifySignature(req.rawBody, sig)) {
-    console.warn("[webhook] Invalid signature");
+    console.warn("[webhook] Invalid signature on POST");
     return res.sendStatus(403);
   }
   next();
