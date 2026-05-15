@@ -178,7 +178,7 @@ export async function getComment(pageId, commentId) {
  * @param {number} options.maxPosts - Giới hạn safety (mặc định 500)
  * @param {number} options.pageSize - Số posts/request (FB max 100)
  * @param {function} options.onProgress - Callback(count) sau mỗi batch
- * @returns {Promise<Array>} Array of posts với fields: id, message, permalink_url, created_time, comments_count, reactions_count
+ * @returns {Promise<Array>}
  */
 export async function getAllPagePosts(pageId, { maxPosts = 500, pageSize = 100, onProgress } = {}) {
   const accessToken = await getTokenCached(pageId);
@@ -187,7 +187,6 @@ export async function getAllPagePosts(pageId, { maxPosts = 500, pageSize = 100, 
   const allPosts = [];
   const fields = "id,message,permalink_url,created_time,comments.summary(true).limit(0),reactions.summary(true).limit(0)";
 
-  // Build first URL
   const firstUrl = new URL(graphApiUrl(`/${pageId}/posts`));
   firstUrl.searchParams.set("access_token", accessToken);
   firstUrl.searchParams.set("fields", fields);
@@ -195,7 +194,7 @@ export async function getAllPagePosts(pageId, { maxPosts = 500, pageSize = 100, 
 
   let nextUrl = firstUrl.toString();
   let pageCount = 0;
-  const maxPagesIterations = 20; // Safety: tối đa 20 lần (= 20 * pageSize posts)
+  const maxPagesIterations = 20; // Safety
 
   while (nextUrl && allPosts.length < maxPosts && pageCount < maxPagesIterations) {
     const response = await fbFetchUrl(nextUrl);

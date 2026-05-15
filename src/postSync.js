@@ -85,7 +85,7 @@ export async function syncPagePosts(pageId, { maxPosts = 500 } = {}) {
  * Dùng khi vừa thêm Page mới.
  */
 export function syncPagePostsBackground(pageId, options = {}) {
-  // setTimeout 0 để chạy sau khi response trả về client
+  // setTimeout để chạy sau khi response trả về client
   setTimeout(() => {
     syncPagePosts(pageId, options).catch((err) => {
       console.error(`[postSync] Background sync failed for page ${pageId}:`, err.message);

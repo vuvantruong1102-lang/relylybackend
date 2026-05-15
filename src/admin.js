@@ -7,6 +7,7 @@ import * as engine from "./replyEngine.js";
 import { sseHandler } from "./sse.js";
 import { invalidateTokenCache } from "./facebook.js";
 import { requireAuth, loginHandler } from "./auth.js";
+import { syncPagePosts } from "./postSync.js";
 
 export const adminRouter = express.Router();
 adminRouter.use(express.json());
@@ -100,6 +101,28 @@ adminRouter.post("/pages/:id/test-send", async (req, res) => {
   }
 });
 
+// ---- Sync Posts từ Facebook ---------------------------------------------
+// Lưu ý: dùng facebookPageId (string) chứ KHÔNG dùng DB id (số),
+// để khớp với cách frontend gọi /api/pages/:facebookPageId/sync-posts
+
+adminRouter.post("/pages/:facebookPageId/sync-posts", async (req, res) => {
+  const { facebookPageId } = req.params;
+
+  // Validate page tồn tại trong DB
+  const page = await Pages.getPageByFacebookId(facebookPageId);
+  if (!page) {
+    return res.status(404).json({ error: `Page ${facebookPageId} không tồn tại trong DB` });
+  }
+
+  try {
+    const result = await syncPagePosts(facebookPageId, { maxPosts: 500 });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("[admin] sync-posts failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ---- Import Excel --------------------------------------------------------
 
 adminRouter.post("/pages/import-excel", upload.single("file"), async (req, res) => {
@@ -170,11 +193,23 @@ adminRouter.post("/pages/import-excel", upload.single("file"), async (req, res) 
   }
 });
 
-// ---- Posts (filter theo pageId) ------------------------------------------
+// ---- Posts (filter theo pageId + hasShopeeLink) --------------------------
 
 adminRouter.get("/posts", async (req, res) => {
-  const { pageId } = req.query;
-  res.json(await Posts.list({ pageId }));
+  try {
+    const { pageId, hasShopeeLink, limit } = req.query;
+    const filter = { limit: limit ? parseInt(limit, 10) : 500 };
+    if (pageId) filter.pageId = pageId;
+    if (hasShopeeLink === "true") filter.hasShopeeLink = true;
+    else if (hasShopeeLink === "false") filter.hasShopeeLink = false;
+
+    const posts = await Posts.list(filter);
+    // Trả về cả { posts, total } để PostsPanel parse được
+    res.json({ posts, total: posts.length });
+  } catch (err) {
+    console.error("[admin] GET /posts failed:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 adminRouter.post("/posts", async (req, res) => {
@@ -192,14 +227,24 @@ adminRouter.post("/posts", async (req, res) => {
 });
 
 adminRouter.patch("/posts/:id", async (req, res) => {
-  const updated = await Posts.update(req.params.id, req.body);
-  if (!updated) return res.sendStatus(404);
-  res.json(updated);
+  try {
+    const updated = await Posts.update(req.params.id, req.body);
+    if (!updated) return res.sendStatus(404);
+    // Trả về { post } để PostsPanel parse được
+    res.json({ post: updated });
+  } catch (err) {
+    console.error("[admin] PATCH /posts failed:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 adminRouter.delete("/posts/:id", async (req, res) => {
-  await Posts.remove(req.params.id);
-  res.sendStatus(204);
+  try {
+    await Posts.remove(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---- Conversations (filter theo pageId) ----------------------------------

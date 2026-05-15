@@ -1,6 +1,7 @@
 import { query } from "./db.js";
 import { encrypt, decrypt, generateVerifyToken } from "./crypto.js";
 import { config, graphApiUrl } from "./config.js";
+import { syncPagePostsBackground } from "./postSync.js";
 
 // ---- Validate token bằng cách gọi Graph API ------------------------------
 
@@ -73,7 +74,8 @@ export async function subscribePageToWebhook(pageAccessToken, pageId) {
 // ---- CRUD ----------------------------------------------------------------
 
 /**
- * Tạo page mới: validate token, encrypt, lưu DB, subscribe webhook
+ * Tạo page mới: validate token, encrypt, lưu DB, subscribe webhook,
+ * và tự động sync posts trong background.
  */
 export async function createPage({ displayName, facebookPageId, accessToken, defaultShopeeLink }) {
   if (!displayName || !facebookPageId || !accessToken) {
@@ -114,6 +116,14 @@ export async function createPage({ displayName, facebookPageId, accessToken, def
   } catch (err) {
     console.error(`[pages] Failed to subscribe webhook: ${err.message}`);
     await query(`UPDATE pages SET last_error = $1 WHERE id = $2`, [err.message, page.id]);
+  }
+
+  // ✨ Auto-sync posts trong background (không block response) ✨
+  try {
+    syncPagePostsBackground(facebookPageId);
+    console.log(`[pages] Started background posts sync for new page ${facebookPageId}`);
+  } catch (err) {
+    console.error(`[pages] Failed to trigger background sync: ${err.message}`);
   }
 
   return sanitizePage(page);
