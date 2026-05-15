@@ -102,13 +102,9 @@ adminRouter.post("/pages/:id/test-send", async (req, res) => {
 });
 
 // ---- Sync Posts từ Facebook ---------------------------------------------
-// Lưu ý: dùng facebookPageId (string) chứ KHÔNG dùng DB id (số),
-// để khớp với cách frontend gọi /api/pages/:facebookPageId/sync-posts
-
 adminRouter.post("/pages/:facebookPageId/sync-posts", async (req, res) => {
   const { facebookPageId } = req.params;
 
-  // Validate page tồn tại trong DB
   const page = await Pages.getPageByFacebookId(facebookPageId);
   if (!page) {
     return res.status(404).json({ error: `Page ${facebookPageId} không tồn tại trong DB` });
@@ -142,7 +138,6 @@ adminRouter.post("/pages/import-excel", upload.single("file"), async (req, res) 
       return res.status(400).json({ error: "Tối đa 50 page mỗi lần import" });
     }
 
-    // Validate từng dòng song song
     const results = await Promise.all(
       rows.map(async (row, idx) => {
         const displayName = String(row.display_name || "").trim();
@@ -204,7 +199,6 @@ adminRouter.get("/posts", async (req, res) => {
     else if (hasShopeeLink === "false") filter.hasShopeeLink = false;
 
     const posts = await Posts.list(filter);
-    // Trả về cả { posts, total } để PostsPanel parse được
     res.json({ posts, total: posts.length });
   } catch (err) {
     console.error("[admin] GET /posts failed:", err);
@@ -230,7 +224,6 @@ adminRouter.patch("/posts/:id", async (req, res) => {
   try {
     const updated = await Posts.update(req.params.id, req.body);
     if (!updated) return res.sendStatus(404);
-    // Trả về { post } để PostsPanel parse được
     res.json({ post: updated });
   } catch (err) {
     console.error("[admin] PATCH /posts failed:", err);
@@ -247,22 +240,35 @@ adminRouter.delete("/posts/:id", async (req, res) => {
   }
 });
 
-// ---- Conversations (filter theo pageId) ----------------------------------
+// ---- Conversations (filter theo pageId, hoặc lấy ALL nếu không truyền) ---
 
 adminRouter.get("/conversations", async (req, res) => {
   const { pageId, status, type, limit } = req.query;
+  // Nếu pageId không có hoặc rỗng → lấy tất cả conversations của mọi pages
   res.json(await Conversations.list({
-    pageId,
+    pageId: pageId || undefined,
     status,
     type,
     limit: limit ? parseInt(limit, 10) : undefined,
   }));
 });
 
+// ✨ MỚI: GET /conversations/:id trả thêm post info (nếu có post_id)
 adminRouter.get("/conversations/:id", async (req, res) => {
   const conv = await Conversations.get(req.params.id);
   if (!conv) return res.sendStatus(404);
-  res.json(conv);
+
+  // Nếu conv có post_id, attach thông tin post vào response
+  let post = null;
+  if (conv.post_id) {
+    try {
+      post = await Posts.get(conv.post_id);
+    } catch (err) {
+      console.warn(`[admin] Could not fetch post ${conv.post_id}:`, err.message);
+    }
+  }
+
+  res.json({ ...conv, post });
 });
 
 adminRouter.post("/conversations/:id/approve", async (req, res) => {
