@@ -3,7 +3,6 @@ import { config, graphApiUrl } from "./config.js";
 import { getPageAccessToken } from "./pages.js";
 
 // ---- Signature verification ---------------------------------------------
-// App Secret là chung cho cả app, nên không cần per-page
 
 export function verifySignature(rawBody, signatureHeader) {
   if (!signatureHeader || !rawBody) return false;
@@ -20,7 +19,7 @@ export function verifySignature(rawBody, signatureHeader) {
   }
 }
 
-// ---- HTTP helper - nhận token qua param ---------------------------------
+// ---- HTTP helper -------------------------------------------------------
 
 async function fbFetch(path, { method = "GET", body, query, accessToken } = {}) {
   if (!accessToken) {
@@ -53,8 +52,6 @@ async function fbFetch(path, { method = "GET", body, query, accessToken } = {}) 
   return json;
 }
 
-// ---- Direct fetch by URL (cho pagination next URL) ---------------------
-
 async function fbFetchUrl(fullUrl) {
   const res = await fetch(fullUrl);
   const json = await res.json().catch(() => ({}));
@@ -69,10 +66,10 @@ async function fbFetchUrl(fullUrl) {
   return json;
 }
 
-// ---- Helper: lookup token cho page (cache trong process) ----------------
+// ---- Token cache --------------------------------------------------------
 
-const tokenCache = new Map(); // pageId -> { token, expiresAt: cache_expiry }
-const CACHE_TTL = 5 * 60 * 1000; // 5 phút
+const tokenCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000;
 
 async function getTokenCached(pageId) {
   const cached = tokenCache.get(pageId);
@@ -94,7 +91,7 @@ export function invalidateTokenCache(pageId) {
   }
 }
 
-// ---- API methods -- tất cả đều nhận pageId làm param đầu ----------------
+// ---- API methods --------------------------------------------------------
 
 export async function sendMessage(pageId, recipientPsid, text) {
   const accessToken = await getTokenCached(pageId);
@@ -146,16 +143,55 @@ export async function getPost(pageId, postId) {
   });
 }
 
+/**
+ * ✨ FIX 1: getUserProfile - LOG ERROR rõ ràng để debug
+ *
+ * Trước: try/catch silent → không biết tại sao fail
+ * Sau: log error rõ ràng + thử fallback với fields tối thiểu (chỉ "name")
+ *
+ * Facebook policy (sau 2023): user phải có "ENGAGEMENT" với Page
+ * (đã từng nhắn tin / comment) trong 30 ngày qua thì mới get được profile.
+ */
 export async function getUserProfile(pageId, psid) {
   const accessToken = await getTokenCached(pageId);
-  if (!accessToken) return null;
+  if (!accessToken) {
+    console.warn(`[fb] getUserProfile: no access token for page ${pageId}`);
+    return null;
+  }
 
+  // Thử với fields đầy đủ trước
   try {
-    return await fbFetch(`/${psid}`, {
+    const profile = await fbFetch(`/${psid}`, {
       accessToken,
       query: { fields: "first_name,last_name,profile_pic" },
     });
+    return profile;
   } catch (err) {
+    console.warn(
+      `[fb] getUserProfile failed for psid=${psid} page=${pageId}: ${err.message}`
+    );
+
+    // ✨ Fallback: thử lấy chỉ field "name" (đôi khi work khi full fields fail)
+    try {
+      const profile = await fbFetch(`/${psid}`, {
+        accessToken,
+        query: { fields: "name" },
+      });
+      if (profile?.name) {
+        // Split name thành first_name + last_name để compatible với code cũ
+        const parts = profile.name.trim().split(/\s+/);
+        return {
+          name: profile.name,
+          first_name: parts[0] || "",
+          last_name: parts.slice(1).join(" ") || "",
+        };
+      }
+    } catch (err2) {
+      console.warn(
+        `[fb] getUserProfile fallback also failed for psid=${psid}: ${err2.message}`
+      );
+    }
+
     return null;
   }
 }
@@ -172,35 +208,30 @@ export async function getComment(pageId, commentId) {
 
 // ---- Fetch ALL posts của Page với pagination ----------------------------
 /**
- * Lấy toàn bộ posts của Page qua pagination.
+ * ✨ FIX 2: getAllPagePosts - INCLUDE comments/reactions count
  *
- * ✨ FIX (2026-05-15):
- * - Giảm pageSize từ 100 → 25 để tránh Facebook error code 1
- *   ("Please reduce the amount of data you're asking for")
- * - BỎ comments.summary và reactions.summary để giảm payload size
- *   (Page lớn với nhiều engagement sẽ trả về data quá lớn)
- * - Tăng maxPagesIterations từ 20 → 30 để bù lại pageSize nhỏ hơn
- * - Thêm retry logic với pageSize=10 nếu vẫn lỗi
+ * Trước: bỏ comments.summary + reactions.summary → count luôn = 0
+ * Sau: include summary fields, có retry logic giảm pageSize nếu data overflow
  *
- * @param {string} pageId - Facebook Page ID
- * @param {object} options
- * @param {number} options.maxPosts - Giới hạn safety (mặc định 500)
- * @param {number} options.pageSize - Số posts/request (mặc định 25)
- * @param {function} options.onProgress - Callback(count) sau mỗi batch
- * @returns {Promise<Array>}
+ * Strategy:
+ * 1. Thử pageSize=25 với fields đầy đủ (kèm summary counts)
+ * 2. Nếu lỗi data overflow → giảm pageSize = 10, vẫn giữ summary
+ * 3. Nếu vẫn lỗi → giảm pageSize = 5, vẫn giữ summary
+ * 4. Cuối cùng: bỏ summary để không bị block hoàn toàn
  */
 export async function getAllPagePosts(pageId, { maxPosts = 500, pageSize = 25, onProgress } = {}) {
   const accessToken = await getTokenCached(pageId);
   if (!accessToken) throw new Error(`No access token for page ${pageId}`);
 
-  // ✨ Fields tối giản: chỉ lấy info cần thiết
-  // Bỏ comments.summary và reactions.summary để giảm payload
-  const fields = "id,message,permalink_url,created_time";
+  // ✨ Include summary cho comments và reactions để lấy count
+  const fieldsWithCounts = "id,message,permalink_url,created_time,comments.summary(true).limit(0),reactions.summary(true).limit(0)";
+  const fieldsMinimal = "id,message,permalink_url,created_time";
 
   return await fetchPostsWithRetry({
     pageId,
     accessToken,
-    fields,
+    fields: fieldsWithCounts,
+    fieldsMinimal,
     pageSize,
     maxPosts,
     onProgress,
@@ -208,10 +239,19 @@ export async function getAllPagePosts(pageId, { maxPosts = 500, pageSize = 25, o
 }
 
 /**
- * Internal helper: fetch posts với retry logic.
- * Nếu pageSize hiện tại bị lỗi → tự động giảm pageSize và thử lại.
+ * Fetch posts với retry logic.
+ * Retry order: pageSize=25 → 10 → 5 → minimal fields (bỏ counts)
  */
-async function fetchPostsWithRetry({ pageId, accessToken, fields, pageSize, maxPosts, onProgress, attempt = 1 }) {
+async function fetchPostsWithRetry({
+  pageId,
+  accessToken,
+  fields,
+  fieldsMinimal,
+  pageSize,
+  maxPosts,
+  onProgress,
+  attempt = 1,
+}) {
   const allPosts = [];
 
   const firstUrl = new URL(graphApiUrl(`/${pageId}/posts`));
@@ -221,7 +261,7 @@ async function fetchPostsWithRetry({ pageId, accessToken, fields, pageSize, maxP
 
   let nextUrl = firstUrl.toString();
   let pageCount = 0;
-  const maxPagesIterations = 30; // Tăng từ 20 → 30 vì pageSize nhỏ hơn
+  const maxPagesIterations = 30;
 
   try {
     while (nextUrl && allPosts.length < maxPosts && pageCount < maxPagesIterations) {
@@ -232,13 +272,18 @@ async function fetchPostsWithRetry({ pageId, accessToken, fields, pageSize, maxP
 
       for (const post of response.data) {
         if (allPosts.length >= maxPosts) break;
+
+        // ✨ Parse comments.summary và reactions.summary đúng cách
+        const commentsCount = post.comments?.summary?.total_count ?? 0;
+        const reactionsCount = post.reactions?.summary?.total_count ?? 0;
+
         allPosts.push({
           id: post.id,
           message: post.message || "",
           permalink_url: post.permalink_url || null,
           created_time: post.created_time || null,
-          comments_count: 0,   // Không lấy summary để giảm payload
-          reactions_count: 0,  // Không lấy summary để giảm payload
+          comments_count: commentsCount,
+          reactions_count: reactionsCount,
         });
       }
 
@@ -249,21 +294,43 @@ async function fetchPostsWithRetry({ pageId, accessToken, fields, pageSize, maxP
       nextUrl = response.paging?.next || null;
     }
 
-    console.log(`[fb] Fetched ${allPosts.length} posts for page ${pageId} (${pageCount} API calls, pageSize=${pageSize})`);
+    console.log(
+      `[fb] Fetched ${allPosts.length} posts for page ${pageId} (${pageCount} API calls, pageSize=${pageSize}, withCounts=${fields.includes('summary')})`
+    );
     return allPosts;
   } catch (err) {
-    // ✨ Auto-retry với pageSize nhỏ hơn nếu gặp lỗi data overflow
     const isDataOverflowError = err.facebook?.code === 1
       || (err.message || "").includes("reduce the amount of data");
 
-    if (isDataOverflowError && attempt < 3) {
-      const newPageSize = Math.max(5, Math.floor(pageSize / 2));
-      console.warn(`[fb] Data overflow error for page ${pageId}. Retrying with pageSize=${newPageSize} (attempt ${attempt + 1}/3)`);
+    if (isDataOverflowError && attempt < 4) {
+      // Strategy retry:
+      // Attempt 1 → 2: giảm pageSize từ 25 → 10
+      // Attempt 2 → 3: giảm pageSize từ 10 → 5
+      // Attempt 3 → 4: bỏ summary, dùng fields minimal
+      let newFields = fields;
+      let newPageSize = pageSize;
+
+      if (attempt === 1) {
+        newPageSize = 10;
+      } else if (attempt === 2) {
+        newPageSize = 5;
+      } else if (attempt === 3) {
+        newFields = fieldsMinimal;
+        newPageSize = 25;
+        console.warn(
+          `[fb] Page ${pageId}: Still data overflow with pageSize=5 + summary. Falling back to minimal fields (counts will be 0).`
+        );
+      }
+
+      console.warn(
+        `[fb] Data overflow for page ${pageId}. Retry attempt ${attempt + 1}/4: pageSize=${newPageSize}, withCounts=${newFields.includes('summary')}`
+      );
 
       return await fetchPostsWithRetry({
         pageId,
         accessToken,
-        fields,
+        fields: newFields,
+        fieldsMinimal,
         pageSize: newPageSize,
         maxPosts,
         onProgress,
@@ -271,7 +338,6 @@ async function fetchPostsWithRetry({ pageId, accessToken, fields, pageSize, maxP
       });
     }
 
-    // Nếu đã có 1 ít posts trước khi lỗi → return những gì đã có
     if (allPosts.length > 0) {
       console.warn(`[fb] Error after fetching ${allPosts.length} posts for page ${pageId}, returning partial data: ${err.message}`);
       return allPosts;
