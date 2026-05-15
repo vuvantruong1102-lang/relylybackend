@@ -5,6 +5,12 @@ import { detectComplaint } from "./intent.js";
 import { config } from "./config.js";
 import { broadcast } from "./sse.js";
 
+// ---- Anti-spam config ---------------------------------------------------
+// Skip nếu cùng khách + cùng post trong khoảng thời gian này.
+// Sau khoảng này, khách comment lại sẽ được reply.
+// Mặc định: 5 phút.
+const COMMENT_ANTI_SPAM_WINDOW_MS = 5 * 60 * 1000;
+
 // ---- Keyword-based reply -------------------------------------------------
 
 function generateKeywordReply({ customerMessage, linkContext }) {
@@ -90,13 +96,16 @@ export async function processComment(payload) {
     }
   }
 
-  // Check duplicate (same customer commented same post recently)
-  const existingConv = await Conversations.findOpenByCustomerAndType({
+  // ✨ Anti-spam check: chỉ skip nếu khách comment cùng post TRONG 5 phút ✨
+  // Sau 5 phút, khách comment lại sẽ được reply bình thường.
+  // Comment ở post khác thì luôn được reply (không bị skip).
+  const recentConv = await Conversations.findOpenByCustomerAndType({
     pageId,
     customerId: from.id,
     type: "comment",
+    withinMs: COMMENT_ANTI_SPAM_WINDOW_MS, // ← 5 phút thay vì default 24h
   });
-  const alreadyRepliedOnThisPost = existingConv && existingConv.post_id === post_id;
+  const alreadyRepliedOnThisPostRecently = recentConv && recentConv.post_id === post_id;
 
   // Create conversation
   const convId = genId("conv");
@@ -138,15 +147,16 @@ export async function processComment(payload) {
     return await Conversations.get(convId);
   }
 
-  // Anti-spam
-  if (alreadyRepliedOnThisPost) {
-    console.log(`[engine] Skipping comment from ${from.id} - already replied on post ${post_id}`);
+  // Anti-spam: cùng khách + cùng post + trong 5 phút → skip
+  if (alreadyRepliedOnThisPostRecently) {
+    const minutesAgo = Math.round((Date.now() - recentConv.updated_at) / 60000);
+    console.log(`[engine] Skipping comment from ${from.id} - already replied on post ${post_id} ${minutesAgo}m ago (anti-spam window: 5m)`);
     await Conversations.setStatus(convId, "skipped_duplicate");
     await Messages.add({
       conversationId: convId,
       role: "ai",
-      text: "[Hệ thống] Bỏ qua - đã reply khách này trên post này.",
-      metadata: { skipped: true, reason: "anti_spam_duplicate" },
+      text: "[Hệ thống] Bỏ qua - đã reply khách này trên post này trong 5 phút qua.",
+      metadata: { skipped: true, reason: "anti_spam_duplicate_within_5min" },
     });
     return await Conversations.get(convId);
   }
