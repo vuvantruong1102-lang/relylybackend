@@ -243,18 +243,24 @@ adminRouter.delete("/posts/:id", async (req, res) => {
 // ---- Conversations (filter theo pageId, hoặc lấy ALL nếu không truyền) ---
 
 adminRouter.get("/conversations", async (req, res) => {
-  const { pageId, status, type, limit } = req.query;
-  // Nếu pageId không có hoặc rỗng → lấy tất cả conversations của mọi pages
+  const { pageId, status, type, limit, before } = req.query;
+  const effectiveLimit = limit ? parseInt(limit, 10) : 50;
+
+  // ✨ Pagination: lấy thêm 1 conv để biết còn data không (hasMore)
   const convs = await Conversations.list({
     pageId: pageId || undefined,
     status,
     type,
-    limit: limit ? parseInt(limit, 10) : undefined,
+    limit: effectiveLimit + 1, // Lấy thừa 1 để check hasMore
+    before: before ? parseInt(before, 10) : undefined,
   });
 
+  // Determine hasMore và cắt mảng về đúng limit
+  const hasMore = convs.length > effectiveLimit;
+  const items = hasMore ? convs.slice(0, effectiveLimit) : convs;
+
   // ✨ Join thêm post.shopee_link (để client-side search theo link)
-  // Batch fetch post info để tránh N+1 query
-  const postIds = [...new Set(convs.map(c => c.post_id).filter(Boolean))];
+  const postIds = [...new Set(items.map(c => c.post_id).filter(Boolean))];
   const postMap = new Map();
   for (const pid of postIds) {
     try {
@@ -265,12 +271,19 @@ adminRouter.get("/conversations", async (req, res) => {
     }
   }
 
-  const enriched = convs.map(c => ({
+  const enriched = items.map(c => ({
     ...c,
     post: c.post_id ? (postMap.get(c.post_id) || null) : null,
   }));
 
-  res.json(enriched);
+  // ✨ Trả về dạng object để client biết hasMore
+  // Backward compat: nếu KHÔNG có 'before' param và client không hiểu format mới
+  // → có thể vẫn dùng được vì array.length, array.map() đều work
+  res.json({
+    conversations: enriched,
+    hasMore,
+    oldestTimestamp: items.length > 0 ? Number(items[items.length - 1].updated_at) : null,
+  });
 });
 
 // ✨ MỚI: GET /conversations/:id trả thêm post info (nếu có post_id)

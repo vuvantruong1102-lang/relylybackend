@@ -145,13 +145,15 @@ export const Conversations = {
     );
   },
 
-  async list({ pageId, status, type, limit = 50 } = {}) {
+  async list({ pageId, status, type, limit = 50, before } = {}) {
     let sql = `SELECT * FROM conversations WHERE 1=1`;
     const params = [];
     let idx = 1;
     if (pageId) { sql += ` AND page_id = $${idx++}`; params.push(pageId); }
     if (status) { sql += ` AND status = $${idx++}`; params.push(status); }
     if (type)   { sql += ` AND type = $${idx++}`;   params.push(type); }
+    // ✨ Pagination: lấy conv có updated_at < before (cho infinite scroll)
+    if (before) { sql += ` AND updated_at < $${idx++}`; params.push(before); }
     sql += ` ORDER BY updated_at DESC LIMIT $${idx}`;
     params.push(limit);
     const r = await query(sql, params);
