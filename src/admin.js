@@ -245,12 +245,32 @@ adminRouter.delete("/posts/:id", async (req, res) => {
 adminRouter.get("/conversations", async (req, res) => {
   const { pageId, status, type, limit } = req.query;
   // Nếu pageId không có hoặc rỗng → lấy tất cả conversations của mọi pages
-  res.json(await Conversations.list({
+  const convs = await Conversations.list({
     pageId: pageId || undefined,
     status,
     type,
     limit: limit ? parseInt(limit, 10) : undefined,
+  });
+
+  // ✨ Join thêm post.shopee_link (để client-side search theo link)
+  // Batch fetch post info để tránh N+1 query
+  const postIds = [...new Set(convs.map(c => c.post_id).filter(Boolean))];
+  const postMap = new Map();
+  for (const pid of postIds) {
+    try {
+      const p = await Posts.get(pid);
+      if (p) postMap.set(pid, { id: p.id, shopee_link: p.shopee_link, message: p.message, title: p.title });
+    } catch (err) {
+      // Skip nếu post không tồn tại
+    }
+  }
+
+  const enriched = convs.map(c => ({
+    ...c,
+    post: c.post_id ? (postMap.get(c.post_id) || null) : null,
   }));
+
+  res.json(enriched);
 });
 
 // ✨ MỚI: GET /conversations/:id trả thêm post info (nếu có post_id)
