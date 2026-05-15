@@ -8,6 +8,7 @@ import {
   classifyIntent,
   getMatchedKeyword,
   getReplyTemplate,
+  prependGreeting,
 } from "./keywordMatcher.js";
 import { generateAIReply, getFallbackReply } from "./aiReply.js";
 
@@ -30,18 +31,21 @@ const ANTI_SPAM_MINUTES = 20;
 //   2. Nếu match nhưng KHÔNG có Shopee link → fallback AI
 // ═══════════════════════════════════════════════════════════════════
 
-async function generateReply({ pageId, customerMessage, linkContext, type, post }) {
+async function generateReply({ pageId, customerMessage, linkContext, type, post, isNewConv }) {
   const link = linkContext?.link || null;
   const intent = classifyIntent(customerMessage);
   const matched = getMatchedKeyword(customerMessage);
 
+  // Helper: thêm greeting nếu là conversation mới
+  const withGreeting = (reply) => isNewConv ? prependGreeting(reply) : reply;
+
   // Flow 1: Match keyword (price hoặc purchase) + có link → template
   if (intent && link) {
     console.log(
-      `[engine] Keyword match: intent="${intent}", kw="${matched?.keyword}" → template reply`
+      `[engine] Keyword match: intent="${intent}", kw="${matched?.keyword}" → template reply (isNewConv=${isNewConv})`
     );
     return {
-      reply: getReplyTemplate(intent, link),
+      reply: withGreeting(getReplyTemplate(intent, link)),
       confidence: 1.0,
       needs_human: false,
       reason: `${intent}_keyword_match`,
@@ -50,12 +54,13 @@ async function generateReply({ pageId, customerMessage, linkContext, type, post 
       matched_intent: intent,
       matched_keyword: matched?.keyword,
       source: `template_${intent}`,
+      with_greeting: !!isNewConv,
     };
   }
 
   // Flow 2: Không match HOẶC match nhưng không có link → gọi AI
   console.log(
-    `[engine] Calling AI (${intent ? "matched but no link" : "no keyword match"})`
+    `[engine] Calling AI (${intent ? "matched but no link" : "no keyword match"}, isNewConv=${isNewConv})`
   );
 
   try {
@@ -67,7 +72,7 @@ async function generateReply({ pageId, customerMessage, linkContext, type, post 
     });
 
     return {
-      reply: aiResult.reply,
+      reply: withGreeting(aiResult.reply),
       confidence: 0.85,
       needs_human: false,
       reason: intent ? `ai_no_link_fallback` : "ai_generated",
@@ -78,11 +83,12 @@ async function generateReply({ pageId, customerMessage, linkContext, type, post 
       tokens: aiResult.tokens,
       matched_intent: intent,
       matched_keyword: matched?.keyword,
+      with_greeting: !!isNewConv,
     };
   } catch (err) {
     console.error("[engine] AI fallback failed, using static fallback:", err.message);
     return {
-      reply: getFallbackReply(),
+      reply: withGreeting(getFallbackReply()),
       confidence: 0.5,
       needs_human: true,
       reason: "ai_failed_static_fallback",
@@ -90,6 +96,7 @@ async function generateReply({ pageId, customerMessage, linkContext, type, post 
       link_sent: false,
       source: "fallback_static",
       error: err.message,
+      with_greeting: !!isNewConv,
     };
   }
 }
@@ -222,6 +229,7 @@ export async function processComment(payload) {
   }
 
   // Generate reply (keyword template hoặc AI)
+  // Comment: mỗi lần là 1 conv mới → luôn isNewConv = true → có greeting
   const linkContext = await resolveLink({ pageId, postId: post_id });
   const aiResult = await generateReply({
     pageId,
@@ -229,6 +237,7 @@ export async function processComment(payload) {
     linkContext,
     type: "comment",
     post,
+    isNewConv: true,
   });
 
   let fbCommentReplyId = null;
@@ -399,6 +408,7 @@ export async function processMessage(payload) {
     linkContext,
     type: "message",
     post,
+    isNewConv,
   });
 
   let fbMessageId = null;
@@ -524,6 +534,7 @@ export async function regenerateReply(conversationId) {
     linkContext,
     type: conv.type,
     post,
+    isNewConv: false, // regenerate không cần chào lại
   });
 
   await Messages.add({

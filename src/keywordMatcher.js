@@ -169,3 +169,47 @@ export const KEYWORDS = {
   price: PRICE_KEYWORDS,
   purchase: PURCHASE_KEYWORDS,
 };
+
+// ═══════════════════════════════════════════════════════════════════
+//   GREETINGS - Câu chào cho conversation mới
+//   Chỉ dùng khi isNewConv = true (lần đầu reply customer này)
+// ═══════════════════════════════════════════════════════════════════
+
+const GREETINGS = [
+  "Dạ shop chào anh/chị ạ!",
+  "Em chào anh/chị!",
+  "Dạ cảm ơn anh/chị đã quan tâm!",
+];
+
+/**
+ * Lấy 1 câu chào ngẫu nhiên từ danh sách
+ * @returns {string}
+ */
+export function getRandomGreeting() {
+  const idx = Math.floor(Math.random() * GREETINGS.length);
+  return GREETINGS[idx];
+}
+
+/**
+ * Prepend câu chào vào reply (cho conversation mới)
+ * @param {string} reply - Reply text gốc
+ * @returns {string} - "{greeting}\n{reply}"
+ */
+export function prependGreeting(reply) {
+  if (!reply) return getRandomGreeting();
+  const greeting = getRandomGreeting();
+  // Tránh duplicate: nếu reply đã bắt đầu bằng "Dạ" / "Em chào" → không thêm
+  const lower = reply.trim().toLowerCase();
+  if (
+    lower.startsWith("dạ shop chào") ||
+    lower.startsWith("em chào") ||
+    lower.startsWith("dạ cảm ơn") ||
+    lower.startsWith("dạ chào")
+  ) {
+    return reply;
+  }
+  return `${greeting} ${reply}`;
+}
+
+// Export greetings list (inspect/test)
+export const GREETINGS_LIST = GREETINGS;
