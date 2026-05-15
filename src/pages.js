@@ -156,15 +156,33 @@ export async function updatePage(id, fields) {
     }
   }
 
+  // Support cả camelCase từ frontend (displayName, defaultShopeeLink)
+  if (fields.displayName !== undefined && fields.display_name === undefined) {
+    sets.push(`display_name = $${idx++}`);
+    params.push(fields.displayName);
+  }
+  if (fields.defaultShopeeLink !== undefined && fields.default_shopee_link === undefined) {
+    sets.push(`default_shopee_link = $${idx++}`);
+    params.push(fields.defaultShopeeLink);
+  }
+
   // Special handling cho update token
+  let newAccessToken = null;
+  let newFacebookPageId = null;
   if (fields.accessToken) {
-    const tokenInfo = await validatePageToken(fields.accessToken);
+    // Lấy page hiện tại để biết facebook_page_id để validate
+    const currentResult = await query(`SELECT facebook_page_id FROM pages WHERE id = $1`, [id]);
+    if (!currentResult.rows[0]) return null;
+    newFacebookPageId = currentResult.rows[0].facebook_page_id;
+
+    const tokenInfo = await validatePageToken(fields.accessToken, newFacebookPageId);
     sets.push(`access_token_enc = $${idx++}`);
     params.push(encrypt(fields.accessToken));
     sets.push(`token_expires_at = $${idx++}`);
     params.push(tokenInfo.expiresAt);
     sets.push(`status = 'active'`);
     sets.push(`last_error = NULL`);
+    newAccessToken = fields.accessToken;
   }
 
   if (sets.length === 0) return getPageById(id);
@@ -177,7 +195,21 @@ export async function updatePage(id, fields) {
     `UPDATE pages SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`,
     params
   );
-  return result.rows[0] ? sanitizePage(result.rows[0]) : null;
+
+  const updated = result.rows[0] ? sanitizePage(result.rows[0]) : null;
+
+  // Nếu vừa update token, tự động re-subscribe webhook
+  if (newAccessToken && newFacebookPageId && updated) {
+    try {
+      await subscribePageToWebhook(newAccessToken, newFacebookPageId);
+      console.log(`[pages] Re-subscribed webhook for page ${newFacebookPageId} after token update`);
+    } catch (err) {
+      console.error(`[pages] Failed to re-subscribe webhook after token update: ${err.message}`);
+      await query(`UPDATE pages SET last_error = $1 WHERE id = $2`, [err.message, id]);
+    }
+  }
+
+  return updated;
 }
 
 export async function deletePage(id) {
@@ -194,10 +226,11 @@ export async function deletePage(id) {
 }
 
 // ---- Helper: Sanitize page (loại bỏ encrypted token khỏi response) -------
+// Giữ verify_token để dashboard hiển thị (dashboard đã có auth bảo vệ)
 
 function sanitizePage(row) {
   if (!row) return null;
-  const { access_token_enc, verify_token, ...safe } = row;
+  const { access_token_enc, ...safe } = row;
   return {
     ...safe,
     has_token: !!access_token_enc,
