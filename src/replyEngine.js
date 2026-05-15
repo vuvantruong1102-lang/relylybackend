@@ -10,7 +10,7 @@ import {
   getReplyTemplate,
   prependGreeting,
 } from "./keywordMatcher.js";
-import { generateAIReply, getFallbackReply } from "./aiReply.js";
+import { generateAIReply, getFallbackReply, AINotConfiguredError } from "./aiReply.js";
 
 // ═══════════════════════════════════════════════════════════════════
 // Anti-spam config
@@ -86,18 +86,17 @@ async function generateReply({ pageId, customerMessage, linkContext, type, post,
       with_greeting: !!isNewConv,
     };
   } catch (err) {
-    console.error("[engine] AI fallback failed, using static fallback:", err.message);
-    return {
-      reply: withGreeting(getFallbackReply()),
-      confidence: 0.5,
-      needs_human: true,
-      reason: "ai_failed_static_fallback",
-      buy_intent: !!intent,
-      link_sent: false,
-      source: "fallback_static",
-      error: err.message,
-      with_greeting: !!isNewConv,
-    };
+    // ✨ Nếu AI chưa configured → return null để caller SKIP (không reply)
+    if (err instanceof AINotConfiguredError || err.code === "AI_NOT_CONFIGURED") {
+      console.log(
+        `[engine] AI not configured → SKIP reply (no template, no AI). Message: "${customerMessage?.slice(0, 60)}"`
+      );
+      return null; // ← signal cho caller biết skip
+    }
+
+    // Lỗi khác của OpenAI → log nhưng không reply gì
+    console.error("[engine] AI call failed → SKIP reply:", err.message);
+    return null;
   }
 }
 
@@ -239,6 +238,22 @@ export async function processComment(payload) {
     post,
     isNewConv: true,
   });
+
+  // ✨ Nếu generateReply trả null (AI chưa configured) → SKIP không reply
+  if (!aiResult) {
+    console.log(`[engine] Skipping comment - no keyword match + no AI available`);
+    await Conversations.setStatus(convId, "skipped_no_ai");
+    await Messages.add({
+      conversationId: convId,
+      role: "ai",
+      text: "[Hệ thống] Bỏ qua - không match keyword và AI chưa được cấu hình.",
+      metadata: {
+        skipped: true,
+        reason: "no_keyword_match_and_no_ai",
+      },
+    });
+    return await Conversations.get(convId);
+  }
 
   let fbCommentReplyId = null;
   let fbInboxMessageId = null;
@@ -411,6 +426,22 @@ export async function processMessage(payload) {
     isNewConv,
   });
 
+  // ✨ Nếu generateReply trả null (AI chưa configured) → SKIP không reply
+  if (!aiResult) {
+    console.log(`[engine] Skipping inbox - no keyword match + no AI available`);
+    await Conversations.setStatus(convId, "skipped_no_ai");
+    await Messages.add({
+      conversationId: convId,
+      role: "ai",
+      text: "[Hệ thống] Bỏ qua - không match keyword và AI chưa được cấu hình.",
+      metadata: {
+        skipped: true,
+        reason: "no_keyword_match_and_no_ai",
+      },
+    });
+    return await Conversations.get(convId);
+  }
+
   let fbMessageId = null;
   try {
     const sent = await FB.sendMessage(pageId, senderId, aiResult.reply);
@@ -536,6 +567,13 @@ export async function regenerateReply(conversationId) {
     post,
     isNewConv: false, // regenerate không cần chào lại
   });
+
+  if (!aiResult) {
+    throw new Error(
+      "Không thể tạo reply: không match keyword và AI chưa được cấu hình. " +
+      "Vui lòng setup OPENAI_API_KEY trong Railway."
+    );
+  }
 
   await Messages.add({
     conversationId,
