@@ -53,6 +53,22 @@ async function fbFetch(path, { method = "GET", body, query, accessToken } = {}) 
   return json;
 }
 
+// ---- Direct fetch by URL (cho pagination next URL) ---------------------
+
+async function fbFetchUrl(fullUrl) {
+  const res = await fetch(fullUrl);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const fbErr = json?.error;
+    const msg = fbErr ? `[${fbErr.code}] ${fbErr.message}` : `HTTP ${res.status}`;
+    const err = new Error(`Facebook API error: ${msg}`);
+    err.facebook = fbErr;
+    err.status = res.status;
+    throw err;
+  }
+  return json;
+}
+
 // ---- Helper: lookup token cho page (cache trong process) ----------------
 
 const tokenCache = new Map(); // pageId -> { token, expiresAt: cache_expiry }
@@ -152,4 +168,60 @@ export async function getComment(pageId, commentId) {
     accessToken,
     query: { fields: "id,message,from,parent,post_id" },
   });
+}
+
+// ---- NEW: Fetch ALL posts của Page với pagination ----------------------
+/**
+ * Lấy toàn bộ posts của Page qua pagination.
+ * @param {string} pageId - Facebook Page ID
+ * @param {object} options
+ * @param {number} options.maxPosts - Giới hạn safety (mặc định 500)
+ * @param {number} options.pageSize - Số posts/request (FB max 100)
+ * @param {function} options.onProgress - Callback(count) sau mỗi batch
+ * @returns {Promise<Array>} Array of posts với fields: id, message, permalink_url, created_time, comments_count, reactions_count
+ */
+export async function getAllPagePosts(pageId, { maxPosts = 500, pageSize = 100, onProgress } = {}) {
+  const accessToken = await getTokenCached(pageId);
+  if (!accessToken) throw new Error(`No access token for page ${pageId}`);
+
+  const allPosts = [];
+  const fields = "id,message,permalink_url,created_time,comments.summary(true).limit(0),reactions.summary(true).limit(0)";
+
+  // Build first URL
+  const firstUrl = new URL(graphApiUrl(`/${pageId}/posts`));
+  firstUrl.searchParams.set("access_token", accessToken);
+  firstUrl.searchParams.set("fields", fields);
+  firstUrl.searchParams.set("limit", String(pageSize));
+
+  let nextUrl = firstUrl.toString();
+  let pageCount = 0;
+  const maxPagesIterations = 20; // Safety: tối đa 20 lần (= 20 * pageSize posts)
+
+  while (nextUrl && allPosts.length < maxPosts && pageCount < maxPagesIterations) {
+    const response = await fbFetchUrl(nextUrl);
+    pageCount++;
+
+    if (!response.data || !Array.isArray(response.data)) break;
+
+    for (const post of response.data) {
+      if (allPosts.length >= maxPosts) break;
+      allPosts.push({
+        id: post.id,
+        message: post.message || "",
+        permalink_url: post.permalink_url || null,
+        created_time: post.created_time || null,
+        comments_count: post.comments?.summary?.total_count || 0,
+        reactions_count: post.reactions?.summary?.total_count || 0,
+      });
+    }
+
+    if (typeof onProgress === "function") {
+      try { onProgress(allPosts.length); } catch {}
+    }
+
+    nextUrl = response.paging?.next || null;
+  }
+
+  console.log(`[fb] Fetched ${allPosts.length} posts for page ${pageId} (${pageCount} API calls)`);
+  return allPosts;
 }

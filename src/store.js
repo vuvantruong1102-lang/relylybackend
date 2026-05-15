@@ -3,18 +3,32 @@ import { query } from "./db.js";
 // ---- Posts ----------------------------------------------------------------
 
 export const Posts = {
-  async upsert({ id, pageId, title, message, shopeeLink, permalink }) {
+  async upsert({ id, pageId, title, message, shopeeLink, permalink, fbCreatedTime, commentsCount, reactionsCount }) {
     const now = Date.now();
     await query(
-      `INSERT INTO posts (id, page_id, title, message, shopee_link, permalink, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+      `INSERT INTO posts (id, page_id, title, message, shopee_link, permalink, fb_created_time, comments_count, reactions_count, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
        ON CONFLICT (id) DO UPDATE SET
          title = EXCLUDED.title,
          message = EXCLUDED.message,
-         shopee_link = EXCLUDED.shopee_link,
+         shopee_link = COALESCE(EXCLUDED.shopee_link, posts.shopee_link),
          permalink = EXCLUDED.permalink,
+         fb_created_time = COALESCE(EXCLUDED.fb_created_time, posts.fb_created_time),
+         comments_count = EXCLUDED.comments_count,
+         reactions_count = EXCLUDED.reactions_count,
          updated_at = EXCLUDED.updated_at`,
-      [id, pageId, title, message, shopeeLink, permalink, now]
+      [
+        id,
+        pageId,
+        title,
+        message,
+        shopeeLink,
+        permalink,
+        fbCreatedTime || null,
+        commentsCount ?? 0,
+        reactionsCount ?? 0,
+        now,
+      ]
     );
     return Posts.get(id);
   },
@@ -24,16 +38,32 @@ export const Posts = {
     return r.rows[0] || null;
   },
 
-  async list({ pageId, limit = 100 } = {}) {
+  async list({ pageId, hasShopeeLink, limit = 500 } = {}) {
+    let sql = `SELECT * FROM posts WHERE 1=1`;
+    const params = [];
+    let idx = 1;
     if (pageId) {
-      const r = await query(
-        `SELECT * FROM posts WHERE page_id = $1 ORDER BY created_at DESC LIMIT $2`,
-        [pageId, limit]
-      );
-      return r.rows;
+      sql += ` AND page_id = $${idx++}`;
+      params.push(pageId);
     }
-    const r = await query(`SELECT * FROM posts ORDER BY created_at DESC LIMIT $1`, [limit]);
+    if (hasShopeeLink === true) {
+      sql += ` AND shopee_link IS NOT NULL AND shopee_link != ''`;
+    } else if (hasShopeeLink === false) {
+      sql += ` AND (shopee_link IS NULL OR shopee_link = '')`;
+    }
+    sql += ` ORDER BY COALESCE(fb_created_time, created_at) DESC LIMIT $${idx}`;
+    params.push(limit);
+    const r = await query(sql, params);
     return r.rows;
+  },
+
+  async count({ pageId } = {}) {
+    if (pageId) {
+      const r = await query(`SELECT COUNT(*) as cnt FROM posts WHERE page_id = $1`, [pageId]);
+      return parseInt(r.rows[0]?.cnt || "0", 10);
+    }
+    const r = await query(`SELECT COUNT(*) as cnt FROM posts`);
+    return parseInt(r.rows[0]?.cnt || "0", 10);
   },
 
   async update(id, fields) {
@@ -57,6 +87,10 @@ export const Posts = {
 
   async remove(id) {
     await query(`DELETE FROM posts WHERE id = $1`, [id]);
+  },
+
+  async removeAllForPage(pageId) {
+    await query(`DELETE FROM posts WHERE page_id = $1`, [pageId]);
   },
 };
 

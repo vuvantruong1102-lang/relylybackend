@@ -26,7 +26,6 @@ export async function query(sql, params = []) {
 }
 
 // ---- Schema migration -----------------------------------------------------
-
 export async function initSchema() {
   console.log("[db] Initializing schema...");
 
@@ -58,9 +57,14 @@ export async function initSchema() {
       updated_at    BIGINT NOT NULL
     );
   `);
-
   await query(`CREATE INDEX IF NOT EXISTS idx_posts_page ON posts(page_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_posts_shopee ON posts(shopee_link);`);
+
+  // ---- Migration: thêm columns mới cho Posts (idempotent) ---------------
+  await query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS fb_created_time BIGINT;`);
+  await query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS comments_count INTEGER DEFAULT 0;`);
+  await query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS reactions_count INTEGER DEFAULT 0;`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_posts_fb_created ON posts(fb_created_time DESC);`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS conversations (
@@ -78,7 +82,6 @@ export async function initSchema() {
       FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE SET NULL
     );
   `);
-
   await query(`CREATE INDEX IF NOT EXISTS idx_conv_page ON conversations(page_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_conv_customer ON conversations(customer_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_conv_post ON conversations(post_id);`);
@@ -95,7 +98,6 @@ export async function initSchema() {
       created_at            BIGINT NOT NULL
     );
   `);
-
   await query(`CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);`);
 
   // Settings là per-page (vì mỗi page có tone, business desc khác nhau)
