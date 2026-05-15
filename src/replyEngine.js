@@ -36,8 +36,9 @@ async function generateReply({ pageId, customerMessage, linkContext, type, post,
   const intent = classifyIntent(customerMessage);
   const matched = getMatchedKeyword(customerMessage);
 
-  // Helper: thêm greeting nếu là conversation mới
-  const withGreeting = (reply) => isNewConv ? prependGreeting(reply) : reply;
+  // ✨ Greeting CHỈ áp dụng cho KEYWORD TEMPLATE (câu cứng, lặp lại)
+  // KHÔNG áp dụng cho AI reply (vì AI tự viết tự nhiên rồi, thêm chào ngoài làm thừa)
+  const withGreetingForTemplate = (reply) => isNewConv ? prependGreeting(reply) : reply;
 
   // Flow 1: Match keyword (price hoặc purchase) + có link → template
   if (intent && link) {
@@ -45,7 +46,7 @@ async function generateReply({ pageId, customerMessage, linkContext, type, post,
       `[engine] Keyword match: intent="${intent}", kw="${matched?.keyword}" → template reply (isNewConv=${isNewConv})`
     );
     return {
-      reply: withGreeting(getReplyTemplate(intent, link)),
+      reply: withGreetingForTemplate(getReplyTemplate(intent, link)),
       confidence: 1.0,
       needs_human: false,
       reason: `${intent}_keyword_match`,
@@ -72,7 +73,8 @@ async function generateReply({ pageId, customerMessage, linkContext, type, post,
     });
 
     return {
-      reply: withGreeting(aiResult.reply),
+      // ✨ KHÔNG prepend greeting - để AI tự viết tự nhiên
+      reply: aiResult.reply,
       confidence: 0.85,
       needs_human: false,
       reason: intent ? `ai_no_link_fallback` : "ai_generated",
@@ -83,7 +85,7 @@ async function generateReply({ pageId, customerMessage, linkContext, type, post,
       tokens: aiResult.tokens,
       matched_intent: intent,
       matched_keyword: matched?.keyword,
-      with_greeting: !!isNewConv,
+      with_greeting: false, // AI tự handle, không prepend
     };
   } catch (err) {
     // ✨ Nếu AI chưa configured → return null để caller SKIP (không reply)
