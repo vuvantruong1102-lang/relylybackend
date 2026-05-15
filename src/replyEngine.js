@@ -256,7 +256,6 @@ export async function processComment(payload) {
   }
 
   let fbCommentReplyId = null;
-  let fbInboxMessageId = null;
 
   try {
     const sent = await FB.replyToComment(pageId, comment_id, aiResult.reply);
@@ -265,14 +264,12 @@ export async function processComment(payload) {
     console.error("[engine] Failed to send comment reply:", err.message);
   }
 
-  try {
-    const inboxSent = await FB.sendPrivateReply(pageId, comment_id, aiResult.reply);
-    fbInboxMessageId = inboxSent?.message_id || inboxSent?.id || null;
-  } catch (err) {
-    console.error("[engine] Failed to send private reply (inbox):", err.message);
-  }
+  // ✨ ANTI-SPAM: KHÔNG tự động gửi private DM khi khách comment
+  // Trước đây: gửi cả public reply + private DM cùng nội dung
+  // → Facebook flag là spam pattern, có thể khóa Page
+  // Giờ: chỉ reply public dưới comment, khách muốn DM thì tự nhắn
 
-  if (fbCommentReplyId || fbInboxMessageId) {
+  if (fbCommentReplyId) {
     await Conversations.setStatus(convId, "replied");
   } else {
     await Conversations.setStatus(convId, "failed");
@@ -288,7 +285,7 @@ export async function processComment(payload) {
       link_source: aiResult.link_sent ? linkContext.source : null,
       auto_sent: true,
       sent_to_comment: !!fbCommentReplyId,
-      sent_to_inbox: !!fbInboxMessageId,
+      sent_to_inbox: false, // ← Tắt tính năng tự DM
     },
     facebookMessageId: fbCommentReplyId,
   });
@@ -371,11 +368,31 @@ export async function processMessage(payload) {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // Anti-spam check (20 phút) cho INBOX: cùng khách → skip
-  // Sử dụng updated_at của conv hiện tại để check
+  // ✨ ANTI-SPAM cho INBOX - LOGIC MỚI (v5)
   // ═══════════════════════════════════════════════════════════════
-  // Chỉ skip nếu là conv cũ và conv đã được reply gần đây
-  if (!isNewConv && conv) {
+  //
+  // Quy tắc: Khách CŨ (đã từng inbox/comment với Page) → bypass anti-spam
+  //          Khách MỚI → giữ anti-spam 20 phút như cũ
+  //
+  // Lý do: Khách cũ đã chat → ý định mua mạnh → cần reply nhanh để chốt đơn
+  //        Khách mới có thể spam test → vẫn cần anti-spam bảo vệ
+  // ═══════════════════════════════════════════════════════════════
+
+  // Check xem khách này đã từng có conversation với Page chưa (bất kể type)
+  const hasAnyPreviousConv = await Conversations.findOpenByCustomerAndType({
+    pageId,
+    customerId: senderId,
+    type: "message",
+  }) || await Conversations.findOpenByCustomerAndType({
+    pageId,
+    customerId: senderId,
+    type: "comment",
+  });
+
+  const isReturningCustomer = !!hasAnyPreviousConv;
+
+  // Chỉ áp dụng anti-spam nếu là KHÁCH MỚI (chưa từng chat trước đây)
+  if (!isReturningCustomer && !isNewConv && conv) {
     const conversation = await Conversations.get(convId);
     const messages = conversation.messages || [];
     // Tìm AI message gần nhất (không tính tin "[Hệ thống]" skip)
@@ -389,7 +406,7 @@ export async function processMessage(payload) {
       if (elapsed < COMMENT_ANTI_SPAM_WINDOW_MS) {
         const minutesAgo = Math.round(elapsed / 60000);
         console.log(
-          `[engine] Skipping inbox from ${senderId} - already replied ${minutesAgo}m ago (anti-spam window: ${ANTI_SPAM_MINUTES}m)`
+          `[engine] Skipping inbox from ${senderId} - new customer + already replied ${minutesAgo}m ago (anti-spam window: ${ANTI_SPAM_MINUTES}m)`
         );
         await Messages.add({
           conversationId: convId,
@@ -403,6 +420,10 @@ export async function processMessage(payload) {
         return await Conversations.get(convId);
       }
     }
+  } else if (isReturningCustomer) {
+    console.log(
+      `[engine] Inbox from ${senderId} - returning customer, BYPASS anti-spam → reply ngay`
+    );
   }
 
   // Generate reply
