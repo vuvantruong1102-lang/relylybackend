@@ -4,53 +4,99 @@ import * as Pages from "./pages.js";
 import { detectComplaint } from "./intent.js";
 import { config } from "./config.js";
 import { broadcast } from "./sse.js";
+import {
+  classifyIntent,
+  getMatchedKeyword,
+  getReplyTemplate,
+} from "./keywordMatcher.js";
+import { generateAIReply, getFallbackReply } from "./aiReply.js";
 
-// ---- Anti-spam config ---------------------------------------------------
-// Skip nếu cùng khách + cùng post trong khoảng thời gian này.
-// Sau khoảng này, khách comment lại sẽ được reply.
-// Mặc định: 5 phút.
-const COMMENT_ANTI_SPAM_WINDOW_MS = 5 * 60 * 1000;
+// ═══════════════════════════════════════════════════════════════════
+// Anti-spam config
+// Skip nếu cùng khách + cùng post trong khoảng thời gian này
+// Áp dụng cho CẢ keyword reply và AI reply (theo yêu cầu user)
+// ═══════════════════════════════════════════════════════════════════
+const COMMENT_ANTI_SPAM_WINDOW_MS = 20 * 60 * 1000; // 20 phút
+const ANTI_SPAM_MINUTES = 20;
 
-// ---- Keyword-based reply -------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
+// generateReply - Logic mới với 2 nhóm template
+//
+// Flow:
+//   1. Classify intent của message:
+//      - "price"    → hỏi giá  → template "xem giá"
+//      - "purchase" → hỏi mua  → template "mua hàng"
+//      - null       → không match → gọi AI
+//   2. Nếu match nhưng KHÔNG có Shopee link → fallback AI
+// ═══════════════════════════════════════════════════════════════════
 
-function generateKeywordReply({ customerMessage, linkContext }) {
+async function generateReply({ pageId, customerMessage, linkContext, type, post }) {
   const link = linkContext?.link || null;
+  const intent = classifyIntent(customerMessage);
+  const matched = getMatchedKeyword(customerMessage);
 
-  if (!link) {
+  // Flow 1: Match keyword (price hoặc purchase) + có link → template
+  if (intent && link) {
+    console.log(
+      `[engine] Keyword match: intent="${intent}", kw="${matched?.keyword}" → template reply`
+    );
     return {
-      reply: "Hiện tại không có link Shopee.",
+      reply: getReplyTemplate(intent, link),
       confidence: 1.0,
       needs_human: false,
-      reason: "no_shopee_link",
-      buy_intent: false,
-      link_sent: false,
+      reason: `${intent}_keyword_match`,
+      buy_intent: true,
+      link_sent: true,
+      matched_intent: intent,
+      matched_keyword: matched?.keyword,
+      source: `template_${intent}`,
     };
   }
 
-  const text = (customerMessage || "").toLowerCase();
-  const askingPriceKeywords = ["giá", "bao nhiêu tiền", "bao nhiêu vậy", "bn tiền", "bn vậy"];
-  const askingBuyKeywords = ["mua", "ở đâu", "link", "địa chỉ", "đặt", "order"];
+  // Flow 2: Không match HOẶC match nhưng không có link → gọi AI
+  console.log(
+    `[engine] Calling AI (${intent ? "matched but no link" : "no keyword match"})`
+  );
 
-  let reply;
-  if (askingPriceKeywords.some(kw => text.includes(kw))) {
-    reply = `Anh chị click vào link Shopee này để xem giá và mua hàng nhé: ${link}`;
-  } else if (askingBuyKeywords.some(kw => text.includes(kw))) {
-    reply = `Anh chị click vào link Shopee này để mua hàng nhé: ${link}`;
-  } else {
-    reply = `Anh chị click vào link Shopee này để mua hàng nhé: ${link}`;
+  try {
+    const aiResult = await generateAIReply({
+      pageId,
+      customerMessage,
+      type,
+      post,
+    });
+
+    return {
+      reply: aiResult.reply,
+      confidence: 0.85,
+      needs_human: false,
+      reason: intent ? `ai_no_link_fallback` : "ai_generated",
+      buy_intent: !!intent,
+      link_sent: false,
+      source: "openai",
+      model: aiResult.model,
+      tokens: aiResult.tokens,
+      matched_intent: intent,
+      matched_keyword: matched?.keyword,
+    };
+  } catch (err) {
+    console.error("[engine] AI fallback failed, using static fallback:", err.message);
+    return {
+      reply: getFallbackReply(),
+      confidence: 0.5,
+      needs_human: true,
+      reason: "ai_failed_static_fallback",
+      buy_intent: !!intent,
+      link_sent: false,
+      source: "fallback_static",
+      error: err.message,
+    };
   }
-
-  return {
-    reply,
-    confidence: 1.0,
-    needs_human: false,
-    reason: "keyword_match",
-    buy_intent: true,
-    link_sent: true,
-  };
 }
 
-// ---- Resolve link --------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
+// Resolve Shopee link
+// ═══════════════════════════════════════════════════════════════════
 
 export async function resolveLink({ pageId, postId }) {
   if (postId) {
@@ -62,19 +108,26 @@ export async function resolveLink({ pageId, postId }) {
   // Fallback: default link của page
   const page = await Pages.getPageByFacebookId(pageId);
   const fallback = page?.default_shopee_link || null;
-  return { link: fallback || null, source: fallback ? "page_default" : null, post: null };
+  return {
+    link: fallback || null,
+    source: fallback ? "page_default" : null,
+    post: null,
+  };
 }
 
-const genId = (prefix) => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+const genId = (prefix) =>
+  `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-// ---- Process incoming COMMENT --------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
+// Process incoming COMMENT
+// ═══════════════════════════════════════════════════════════════════
 
 export async function processComment(payload) {
   const { pageId, comment_id, post_id, message, from } = payload;
 
   if (!message || !from || !pageId) return null;
 
-  // Don't reply to ourselves (page commenting on own post)
+  // Don't reply to ourselves
   if (from.id === pageId) return null;
 
   // Make sure we have post info
@@ -96,16 +149,18 @@ export async function processComment(payload) {
     }
   }
 
-  // ✨ Anti-spam check: chỉ skip nếu khách comment cùng post TRONG 5 phút ✨
-  // Sau 5 phút, khách comment lại sẽ được reply bình thường.
-  // Comment ở post khác thì luôn được reply (không bị skip).
+  // ═══════════════════════════════════════════════════════════════
+  // Anti-spam check (20 phút): cùng khách + cùng post → skip
+  // Áp dụng cho CẢ keyword reply và AI reply
+  // ═══════════════════════════════════════════════════════════════
   const recentConv = await Conversations.findOpenByCustomerAndType({
     pageId,
     customerId: from.id,
     type: "comment",
-    withinMs: COMMENT_ANTI_SPAM_WINDOW_MS, // ← 5 phút thay vì default 24h
+    withinMs: COMMENT_ANTI_SPAM_WINDOW_MS,
   });
-  const alreadyRepliedOnThisPostRecently = recentConv && recentConv.post_id === post_id;
+  const alreadyRepliedOnThisPostRecently =
+    recentConv && recentConv.post_id === post_id;
 
   // Create conversation
   const convId = genId("conv");
@@ -129,7 +184,7 @@ export async function processComment(payload) {
     metadata: { fb_comment_id: comment_id, fb_post_id: post_id },
   });
 
-  // Check auto-reply per page
+  // Auto-reply enabled check
   const autoEnabled = await Settings.get(pageId, "auto_reply_enabled");
   if (autoEnabled === false) {
     return await Conversations.get(convId);
@@ -147,25 +202,33 @@ export async function processComment(payload) {
     return await Conversations.get(convId);
   }
 
-  // Anti-spam: cùng khách + cùng post + trong 5 phút → skip
+  // Anti-spam: cùng khách + cùng post + trong 20 phút → skip
   if (alreadyRepliedOnThisPostRecently) {
     const minutesAgo = Math.round((Date.now() - recentConv.updated_at) / 60000);
-    console.log(`[engine] Skipping comment from ${from.id} - already replied on post ${post_id} ${minutesAgo}m ago (anti-spam window: 5m)`);
+    console.log(
+      `[engine] Skipping comment from ${from.id} - already replied on post ${post_id} ${minutesAgo}m ago (anti-spam window: ${ANTI_SPAM_MINUTES}m)`
+    );
     await Conversations.setStatus(convId, "skipped_duplicate");
     await Messages.add({
       conversationId: convId,
       role: "ai",
-      text: "[Hệ thống] Bỏ qua - đã reply khách này trên post này trong 5 phút qua.",
-      metadata: { skipped: true, reason: "anti_spam_duplicate_within_5min" },
+      text: `[Hệ thống] Bỏ qua - đã reply khách này trên post này trong ${ANTI_SPAM_MINUTES} phút qua.`,
+      metadata: {
+        skipped: true,
+        reason: `anti_spam_duplicate_within_${ANTI_SPAM_MINUTES}min`,
+      },
     });
     return await Conversations.get(convId);
   }
 
-  // Generate reply
+  // Generate reply (keyword template hoặc AI)
   const linkContext = await resolveLink({ pageId, postId: post_id });
-  const aiResult = generateKeywordReply({
+  const aiResult = await generateReply({
+    pageId,
     customerMessage: message,
     linkContext,
+    type: "comment",
+    post,
   });
 
   let fbCommentReplyId = null;
@@ -209,7 +272,9 @@ export async function processComment(payload) {
   return await Conversations.get(convId);
 }
 
-// ---- Process incoming MESSAGE (DM) ---------------------------------------
+// ═══════════════════════════════════════════════════════════════════
+// Process incoming MESSAGE (DM)
+// ═══════════════════════════════════════════════════════════════════
 
 export async function processMessage(payload) {
   const { pageId, mid, senderId, text, referralPostId } = payload;
@@ -225,6 +290,7 @@ export async function processMessage(payload) {
   });
 
   let convId;
+  let isNewConv = false;
 
   if (conv) {
     convId = conv.id;
@@ -233,6 +299,7 @@ export async function processMessage(payload) {
     }
   } else {
     convId = genId("conv");
+    isNewConv = true;
     let customerName = "Khách";
     try {
       const profile = await FB.getUserProfile(pageId, senderId);
@@ -261,11 +328,13 @@ export async function processMessage(payload) {
     metadata: { fb_mid: mid, referral_post_id: referralPostId },
   });
 
+  // Auto-reply enabled check
   const autoEnabled = await Settings.get(pageId, "auto_reply_enabled");
   if (autoEnabled === false) {
     return await Conversations.get(convId);
   }
 
+  // Detect complaint
   if (detectComplaint(text)) {
     await Conversations.setStatus(convId, "needs_review");
     await Messages.add({
@@ -277,11 +346,59 @@ export async function processMessage(payload) {
     return await Conversations.get(convId);
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // Anti-spam check (20 phút) cho INBOX: cùng khách → skip
+  // Sử dụng updated_at của conv hiện tại để check
+  // ═══════════════════════════════════════════════════════════════
+  // Chỉ skip nếu là conv cũ và conv đã được reply gần đây
+  if (!isNewConv && conv) {
+    const conversation = await Conversations.get(convId);
+    const messages = conversation.messages || [];
+    // Tìm AI message gần nhất (không tính tin "[Hệ thống]" skip)
+    const lastAiMsg = [...messages].reverse().find(
+      (m) => m.role === "ai" && !m.metadata?.skipped
+    );
+
+    if (lastAiMsg) {
+      const lastAiTime = Number(lastAiMsg.created_at);
+      const elapsed = Date.now() - lastAiTime;
+      if (elapsed < COMMENT_ANTI_SPAM_WINDOW_MS) {
+        const minutesAgo = Math.round(elapsed / 60000);
+        console.log(
+          `[engine] Skipping inbox from ${senderId} - already replied ${minutesAgo}m ago (anti-spam window: ${ANTI_SPAM_MINUTES}m)`
+        );
+        await Messages.add({
+          conversationId: convId,
+          role: "ai",
+          text: `[Hệ thống] Bỏ qua - đã reply khách này trong ${ANTI_SPAM_MINUTES} phút qua.`,
+          metadata: {
+            skipped: true,
+            reason: `anti_spam_duplicate_within_${ANTI_SPAM_MINUTES}min`,
+          },
+        });
+        return await Conversations.get(convId);
+      }
+    }
+  }
+
+  // Generate reply
   const conversation = await Conversations.get(convId);
-  const linkContext = await resolveLink({ pageId, postId: conversation.post_id });
-  const aiResult = generateKeywordReply({
+  const linkContext = await resolveLink({
+    pageId,
+    postId: conversation.post_id,
+  });
+  // Lấy post info nếu có post_id (cho AI context)
+  let post = null;
+  if (conversation.post_id) {
+    post = await Posts.get(conversation.post_id);
+  }
+
+  const aiResult = await generateReply({
+    pageId,
     customerMessage: text,
     linkContext,
+    type: "message",
+    post,
   });
 
   let fbMessageId = null;
@@ -310,7 +427,9 @@ export async function processMessage(payload) {
   return await Conversations.get(convId);
 }
 
-// ---- Process new/edited POST ---------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
+// Process new/edited POST
+// ═══════════════════════════════════════════════════════════════════
 
 export async function processPostUpdate(payload) {
   const { pageId, post_id, message, verb } = payload;
@@ -351,7 +470,9 @@ export async function processPostUpdate(payload) {
   }
 }
 
-// ---- Manual reply --------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
+// Manual reply (từ Dashboard)
+// ═══════════════════════════════════════════════════════════════════
 
 export async function sendManualReply({ conversationId, text }) {
   const conv = await Conversations.get(conversationId);
@@ -377,19 +498,32 @@ export async function sendManualReply({ conversationId, text }) {
   return await Conversations.get(conversationId);
 }
 
-// ---- Regenerate reply ----------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
+// Regenerate reply (từ Dashboard)
+// ═══════════════════════════════════════════════════════════════════
 
 export async function regenerateReply(conversationId) {
   const conv = await Conversations.get(conversationId);
   if (!conv) throw new Error("Conversation not found");
 
-  const lastCustomer = [...conv.messages].reverse().find(m => m.role === "customer");
+  const lastCustomer = [...conv.messages].reverse().find((m) => m.role === "customer");
   if (!lastCustomer) throw new Error("No customer message to reply to");
 
-  const linkContext = await resolveLink({ pageId: conv.page_id, postId: conv.post_id });
-  const aiResult = generateKeywordReply({
+  const linkContext = await resolveLink({
+    pageId: conv.page_id,
+    postId: conv.post_id,
+  });
+  let post = null;
+  if (conv.post_id) {
+    post = await Posts.get(conv.post_id);
+  }
+
+  const aiResult = await generateReply({
+    pageId: conv.page_id,
     customerMessage: lastCustomer.text,
     linkContext,
+    type: conv.type,
+    post,
   });
 
   await Messages.add({

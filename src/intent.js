@@ -1,47 +1,186 @@
-// Detect cac tin hieu khieu nai trong message khach hang
-// Khi phat hien -> khong auto reply, day len cho nhan vien
+// ═══════════════════════════════════════════════════════════════════
+//   Intent Detection v2
+//   - Phát hiện complaint với word boundary (chính xác cao)
+//   - BỎ keywords gây false positive: "hư", "hỏng" đơn lẻ
+//   - Giữ keywords đặc trưng + pattern phức tạp
+// ═══════════════════════════════════════════════════════════════════
 
-// Tu khoa khieu nai - moi tu phai du dac trung, KHONG dung tu 1 ky tu
-// vi se match nham vao cac tu khac (vd "to" match "tot", "tom"...)
+/**
+ * Keywords báo hiệu khách HỎI/KHIẾU NẠI rõ ràng.
+ *
+ * IMPORTANT: KHÔNG dùng keyword 1-2 ký tự hoặc dễ là substring
+ * của từ khác. Ví dụ:
+ *   - "hư" match trong "như", "nhưng", "phương", "thư"
+ *   - "to" match trong "tốt", "tôm"
+ *   - "lỗi" match trong "lối", "khối" (nếu không có word boundary)
+ *
+ * Mỗi keyword phải là CỤM TỪ ĐẶC TRƯNG hoặc dùng word boundary.
+ */
 const COMPLAINT_KEYWORDS = [
-  "lỗi sản phẩm", "hàng lỗi", "bị lỗi",
-  "hỏng", "hư", "kém chất lượng",
-  "tệ quá", "tệ thế", "tệ vậy", "quá tệ",
-  "chán quá", "thất vọng",
-  "lừa đảo", "lừa người", "bị lừa",
-  "trả hàng", "hoàn tiền", "refund",
-  "khiếu nại", "phản ánh", "phàn nàn",
-  "không nhận được", "chưa nhận được", "không nhận hàng",
-  "thiếu hàng", "sai hàng", "giao sai",
-  "hàng rách", "hàng vỡ", "hàng móp", "hàng bể",
-  "ố vàng", "ố bẩn", "bị bẩn", "hàng bẩn", "hàng dơ",
-  "cảnh báo", "tố cáo", "scam",
-  "dở quá", "mất tiền",
+  // Lỗi sản phẩm (cụm rõ ràng)
+  "lỗi sản phẩm",
+  "hàng lỗi",
+  "bị lỗi",
+  "hàng hỏng",
+  "bị hỏng",
+  "kém chất lượng",
+  "không đúng hàng",
+  "không đúng sản phẩm",
+
+  // Phàn nàn chất lượng (cụm cảm thán)
+  "tệ quá",
+  "tệ thế",
+  "tệ vậy",
+  "quá tệ",
+  "chán quá",
+  "dở quá",
+  "thất vọng",
+  "không hài lòng",
+
+  // Lừa đảo (cụm có ngữ cảnh)
+  "lừa đảo",
+  "lừa người",
+  "bị lừa",
+  "scam",
+  "cảnh báo shop",
+  "tố cáo shop",
+  "shop lừa",
+
+  // Hoàn trả / refund
+  "trả hàng",
+  "hoàn tiền",
+  "hoàn trả",
+  "refund",
+  "đổi trả",
+  "mất tiền",
+
+  // Khiếu nại / phản ánh
+  "khiếu nại",
+  "phản ánh",
+  "phàn nàn",
+  "yêu cầu giải quyết",
+
+  // Không nhận được hàng
+  "không nhận được",
+  "chưa nhận được",
+  "không nhận hàng",
+  "chưa nhận hàng",
+  "không có hàng",
+  "không thấy hàng",
+
+  // Sai / thiếu hàng
+  "thiếu hàng",
+  "sai hàng",
+  "giao sai",
+  "giao thiếu",
+  "giao nhầm",
+  "nhận sai",
+  "nhầm hàng",
+
+  // Hàng bị hư hại
+  "hàng rách",
+  "hàng vỡ",
+  "hàng móp",
+  "hàng bể",
+  "hàng nát",
+  "hàng dơ",
+  "hàng bẩn",
+  "bị bẩn",
+  "ố vàng",
+  "ố bẩn",
+  "rách rồi",
+  "vỡ rồi",
+  "móp rồi",
 ];
 
-// Patterns: chi match khi co cau truc complaint ro rang
+/**
+ * Patterns: chi tiết hơn keyword đơn, cần cấu trúc câu rõ ràng.
+ */
 const COMPLAINT_PATTERNS = [
-  /không\s+(?:hài\s*lòng|đúng\s*hàng|đúng\s*sản\s*phẩm)/i,
-  /(?:đã|tôi)\s+(?:đặt|mua)\s+.+(?:nhưng|mà)\s+.*(?:không|chưa|sai|lỗi)/i,
+  // "đã đặt ... nhưng/mà không/chưa/sai/lỗi"
+  /(?:đã|tôi|mình|em|tớ)\s+(?:đặt|mua|order)\s+.{1,80}?(?:nhưng|mà|nhung|ma)\s+.{0,50}?(?:không|chưa|sai|lỗi|hỏng|tệ|chán|dở)/i,
+
+  // "không hài lòng về ..."
+  /không\s+hài\s*lòng/i,
+
+  // "rất tệ", "cực tệ", "vô cùng tệ"
+  /(?:rất|cực|vô\s*cùng|hết\s*sức)\s+(?:tệ|chán|kém|dở|tồi)/i,
 ];
 
-export function detectComplaint(text) {
-  if (!text) return false;
-  const lower = text.toLowerCase();
+/**
+ * Match keyword với word boundary
+ * Cách 1: nếu keyword có chứa space (cụm từ) → dùng includes() OK
+ *         vì cụm 2 từ ít khi match nhầm
+ * Cách 2: nếu keyword là 1 từ → dùng regex \b để word boundary
+ */
+function matchKeyword(text, keyword) {
+  const isMultiWord = keyword.includes(" ");
 
+  if (isMultiWord) {
+    // Cụm từ: dùng includes() đơn giản
+    return text.toLowerCase().includes(keyword.toLowerCase());
+  } else {
+    // Từ đơn: dùng word boundary để tránh substring match
+    // Escape special regex chars
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`\\b${escaped}\\b`, "i");
+    return pattern.test(text);
+  }
+}
+
+/**
+ * Detect complaint trong message khách hàng
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function detectComplaint(text) {
+  if (!text || typeof text !== "string") return false;
+
+  // Check keywords
   for (const kw of COMPLAINT_KEYWORDS) {
-    if (lower.includes(kw)) return true;
+    if (matchKeyword(text, kw)) {
+      return true;
+    }
   }
+
+  // Check patterns
   for (const re of COMPLAINT_PATTERNS) {
-    if (re.test(text)) return true;
+    if (re.test(text)) {
+      return true;
+    }
   }
+
   return false;
 }
 
-// Buy intent (giu lai de dung sau)
+/**
+ * Trả về keyword/pattern đã match (debug)
+ * @param {string} text
+ * @returns {string|null}
+ */
+export function getMatchedComplaintReason(text) {
+  if (!text) return null;
+
+  for (const kw of COMPLAINT_KEYWORDS) {
+    if (matchKeyword(text, kw)) return `keyword:${kw}`;
+  }
+
+  for (let i = 0; i < COMPLAINT_PATTERNS.length; i++) {
+    if (COMPLAINT_PATTERNS[i].test(text)) return `pattern:${i}`;
+  }
+
+  return null;
+}
+
+/**
+ * Buy intent (giữ lại để dùng sau)
+ */
 export function detectBuyIntent(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
-  const buyKeywords = ["mua", "order", "đặt", "ship", "giao hàng", "ở đâu", "link", "giá", "bao nhiêu"];
-  return buyKeywords.some(kw => lower.includes(kw));
+  const buyKeywords = [
+    "mua", "order", "đặt", "ship", "giao hàng",
+    "ở đâu", "link", "giá", "bao nhiêu",
+  ];
+  return buyKeywords.some((kw) => lower.includes(kw));
 }
